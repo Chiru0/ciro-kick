@@ -9,9 +9,9 @@ Generador de kicks VST3 para FL Studio (Schranz, Psytrance, Hard Bounce, Hardsty
 4. En FL Studio: Options → Manage plugins → Find plugins. Aparece como instrumento "CIRO KICK".
 
 ## Compilar en tu PC (Windows)
-Necesitás Visual Studio 2022 (con "Desarrollo para escritorio con C++") y CMake.
+Necesitás Visual Studio (con "Desarrollo para escritorio con C++") y CMake.
 ```
-cmake -B build -G "Visual Studio 17 2022" -A x64
+cmake -B build -A x64
 cmake --build build --config Release --target CiroKick_VST3
 ```
 El plugin queda en `build\CiroKick_artefacts\Release\VST3\`.
