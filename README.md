@@ -29,3 +29,17 @@ El plugin queda en `build\CiroKick_artefacts\Release\VST3\`.
 - **PLAY**: escuchar. Cualquier nota MIDI también dispara el kick.
 - **KEY**: si está prendido, el tono sigue la nota que tocás.
 - Click en el tipo de drive (SOFT/HARD/FOLD/CRUSH) para cambiarlo, click derecho para volver.
+
+## Pestaña BUILDER (armado por capas)
+- **BODY**: STARTER, PUNCHY, TECHNO, DISTORTED, ROUNDED. El dado lo regenera.
+- **PUNCH**: HARDSTYLISH, INDUSTRIAL, TOP KICK, TRANSIENT, TOKYO SNAP.
+- **TAIL**: BIGROOM, IND CRUNCH, PSY ROLL, PSY SHOT, RAW CRUNCH, REVERSE, ROBOT, RUMBLE.
+- **EXTRA A / B**: CLICK, LOW MID, NOISE, NOISE 2, RESONATOR, REVERB, SCHRANZ TOP.
+- Click en la categoría = siguiente, click derecho = anterior. Dado = variación nueva de esa capa.
+- **BUILD!** arma un kick completo al azar. RANDOM y los presets usan capas según el género.
+
+## La cabeza
+- Las pestañas son los dientes de arriba; LOOP, -, + y HIT! son los de abajo. El gráfico está en la garganta.
+- Tocá la cabeza para que gire y dispare el kick. Los ojos siguen el mouse.
+- RANDOM lo marea, MUTATE le hace sacudir la cabeza, cambiar de pestaña lo hace morder.
+- Con más drive se enoja (cejas y cachetes rojos). El rumble lo hace temblar.

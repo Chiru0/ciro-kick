@@ -1,14 +1,16 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "PluginProcessor.h"
+#include "PaperStyle.h"
+#include "Head3D.h"
 
 namespace ui
 {
-    const juce::Colour bg      { 0xff111114 };
-    const juce::Colour panel   { 0xff1a1a1f };
-    const juce::Colour track   { 0xff2a2a31 };
-    const juce::Colour text    { 0xffe9e9ee };
-    const juce::Colour dim     { 0xff7c7c88 };
+    const juce::Colour bg      { 0xff2b1d14 };   // ink
+    const juce::Colour panel   { 0xfff4ead3 };   // cream paper
+    const juce::Colour track   { 0xffd8c6a2 };   // darker paper
+    const juce::Colour text    { 0xff2b1d14 };
+    const juce::Colour dim     { 0xff7a6046 };
 }
 
 // Spring used for the squishy press/pop animations.
@@ -83,6 +85,14 @@ protected:
     bool hover = false;
 };
 
+// A tooth in Ciro's mouth that works as a button (gold when selected).
+class ToothButton : public FunButton
+{
+public:
+    bool upper = true;
+    void paint (juce::Graphics&) override;
+};
+
 // Big pad with expanding rings on every hit.
 class PlayPad : public FunButton
 {
@@ -153,7 +163,8 @@ public:
     void mouseDrag (const juce::MouseEvent&) override;
     bool animate();
 private:
-    int stepAt (float x) const;
+    int stepAt (juce::Point<float>) const;
+    juce::Rectangle<float> cell (int i, int n) const;
     CiroKickProcessor& proc;
     int paintValue = 1, lastPainted = -1, lastStep = -2;
     float flashes[32] {};
@@ -170,6 +181,7 @@ public:
     void mouseMove (const juce::MouseEvent&) override;
     void mouseExit (const juce::MouseEvent&) override { hoverNode = -1; repaint(); }
     void mouseDoubleClick (const juce::MouseEvent&) override;
+    bool throat = false;
     void setMode (int m) { mode = m; hasCache = false; repaint(); }
     int mode = 0;
     void update (juce::Colour accent, double nowMs);
@@ -198,6 +210,19 @@ private:
     float spanMs = 450.0f, shake = 0.0f;
 };
 
+// Two buttons stacked in one knob cell (layer type + dice).
+struct ButtonStack : public juce::Component
+{
+    FunButton top, bottom;
+    ButtonStack() { addAndMakeVisible (top); addAndMakeVisible (bottom); }
+    void resized() override
+    {
+        auto r = getLocalBounds();
+        top.setBounds (r.removeFromTop (r.getHeight() / 2).reduced (0, 1));
+        bottom.setBounds (r.reduced (8, 1));
+    }
+};
+
 class CiroKickEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:
@@ -208,7 +233,7 @@ public:
 
 private:
     void timerCallback() override;
-    void layoutRow (std::vector<std::vector<juce::Component*>> groups, int y);
+    void layoutRow (std::vector<std::vector<juce::Component*>> groups, int y, int cell = 80);
     void showPresetMenu();
     void stepPreset (int delta);
     std::unique_ptr<juce::ParameterAttachment> attachCycle (FunButton&, const char* id, int count);
@@ -218,12 +243,20 @@ private:
     WaveDisplay display;
     std::vector<std::unique_ptr<FunKnob>> knobs;
     std::map<juce::String, FunKnob*> knobById;
-    FaceLogo face;
+    Head3D head;
     XYPad xyPad;
     StepStrip stepStrip;
-    FunButton loopLessBtn, loopMoreBtn;
-    FunButton mutateBtn, loopBtn, rRateBtn, bOscBtn;
-    FunButton tabBtns[3];
+    ToothButton loopLessBtn, loopMoreBtn, loopBtn, hitBtn;
+    FunButton mutateBtn, rRateBtn, bOscBtn;
+    ToothButton tabBtns[4];
+    ButtonStack layerStacks[numLayers];
+    ButtonStack bodyStack;
+    FunButton& bodyBtn = bodyStack.top;
+    FunButton& bodyDice = bodyStack.bottom;
+    FunButton buildBtn;
+    void placeMouth();
+    juce::Rectangle<int> mouthRect;
+    void flashLayer (juce::Component&);
     int tab = 0, frame = 0;
     void setTab (int);
     std::unique_ptr<juce::ParameterAttachment> rRateAtt, bOscAtt;
@@ -237,4 +270,5 @@ private:
     int lastHit = 0, dieFace = 5;
     float dieSpin = 0.0f, bgFlash = 0.0f;
     std::vector<std::pair<juce::String, juce::Rectangle<int>>> sectionLabels;
+    juce::Image background;
 };

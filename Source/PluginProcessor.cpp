@@ -89,6 +89,34 @@ APVTS::ParameterLayout CiroKickProcessor::createLayout()
     }
     p.push_back (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "loop", 1 }, "Loop", false));
 
+    // kick builder layers
+    static const char* slotNames[numLayers] = { "Punch", "Tail", "Extra A", "Extra B" };
+    for (int i = 0; i < numLayers; ++i)
+    {
+        const auto L = "L" + juce::String (i);
+        const juce::String nm = slotNames[i];
+        juce::StringArray types;
+        for (auto* t : layerTypeNames (layerRole (i))) types.add (t);
+        const auto d = layerDefaults (i, i == 2 ? 0 : i == 3 ? 2 : 0);
+        p.push_back (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { L + "Type", 1 }, nm + " Type", types, d.type));
+        auto addL = [&] (const char* suffix, const char* name, juce::NormalisableRange<float> r, float def, const char* unit)
+        {
+            p.push_back (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { L + suffix, 1 }, nm + " " + name, r, def,
+                                                                      juce::AudioParameterFloatAttributes().withLabel (unit)));
+        };
+        addL ("Lvl",   "Level", juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f, "");
+        addL ("Tune",  "Tune",  juce::NormalisableRange<float> (-24.0f, 24.0f, 1.0f), d.tune, "st");
+        addL ("Dec",   "Decay", skewed (5.0f, 1500.0f, 200.0f), d.decay, "ms");
+        addL ("Drv",   "Drive", juce::NormalisableRange<float> (0.0f, 36.0f), d.drive, "dB");
+        addL ("Tone",  "Tone",  skewed (80.0f, 12000.0f, 1500.0f), d.tone, "Hz");
+        addL ("Start", "Start", skewed (0.0f, 500.0f, 60.0f), d.start, "ms");
+    }
+    {
+        juce::StringArray b;
+        for (auto* t : bodyCatNames()) b.add (t);
+        p.push_back (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "body", 1 }, "Body Type", b, 0));
+    }
+
     return { p.begin(), p.end() };
 }
 
@@ -167,6 +195,19 @@ KickParams CiroKickProcessor::readParams() const
     k.bassSemi    = val (apvts, "bSemi");
     k.bassDecay   = val (apvts, "bDecay");
     k.bassCutoff  = val (apvts, "bCut");
+    for (int i = 0; i < numLayers; ++i)
+    {
+        const auto L = "L" + juce::String (i);
+        auto& l = k.layers[i];
+        l.type  = (int) val (apvts, (L + "Type").toRawUTF8());
+        l.level = val (apvts, (L + "Lvl").toRawUTF8());
+        l.tune  = val (apvts, (L + "Tune").toRawUTF8());
+        l.decay = val (apvts, (L + "Dec").toRawUTF8());
+        l.drive = val (apvts, (L + "Drv").toRawUTF8());
+        l.tone  = val (apvts, (L + "Tone").toRawUTF8());
+        l.start = val (apvts, (L + "Start").toRawUTF8());
+    }
+    k.bodyCat    = (int) val (apvts, "body");
     k.volume     = val (apvts, "volume");
     k.keyTrack   = val (apvts, "keyTrack") > 0.5f;
     return k;
@@ -236,6 +277,85 @@ void CiroKickProcessor::writeParams (const KickParams& k)
     setParam (apvts, "bSemi",  k.bassSemi);
     setParam (apvts, "bDecay", k.bassDecay);
     setParam (apvts, "bCut",   k.bassCutoff);
+    for (int i = 0; i < numLayers; ++i)
+    {
+        const auto L = "L" + juce::String (i);
+        const auto& l = k.layers[i];
+        setParam (apvts, (L + "Type").toRawUTF8(), (float) l.type);
+        setParam (apvts, (L + "Lvl").toRawUTF8(), l.level);
+        setParam (apvts, (L + "Tune").toRawUTF8(), l.tune);
+        setParam (apvts, (L + "Dec").toRawUTF8(), l.decay);
+        setParam (apvts, (L + "Drv").toRawUTF8(), l.drive);
+        setParam (apvts, (L + "Tone").toRawUTF8(), l.tone);
+        setParam (apvts, (L + "Start").toRawUTF8(), l.start);
+    }
+    setParam (apvts, "body", (float) k.bodyCat);
+}
+
+void CiroKickProcessor::pushHistory()
+{
+    history.push_back ({ readParams(), getPresetName() });
+    if (history.size() > 50) history.erase (history.begin());
+}
+
+void CiroKickProcessor::setLayerType (int slot, int type)
+{
+    pushHistory();
+    auto k = readParams();
+    if (slot < 0)
+    {
+        applyBody (k, type, rng);
+    }
+    else
+    {
+        const float lvl = k.layers[slot].level;
+        auto l = layerDefaults (slot, type);
+        varyLayer (l, rng, 0.3f);
+        l.level = lvl > 0.0001f ? lvl : 0.4f;
+        k.layers[slot] = l;
+    }
+    writeParams (k);
+    if (! getPresetName().endsWith ("*")) setPresetName (getPresetName() + " *");
+    triggerFromUI();
+}
+
+void CiroKickProcessor::rollLayer (int slot)
+{
+    pushHistory();
+    auto k = readParams();
+    if (slot < 0) applyBody (k, k.bodyCat, rng);
+    else
+    {
+        const float lvl = k.layers[slot].level;
+        auto l = layerDefaults (slot, k.layers[slot].type);
+        varyLayer (l, rng, 1.5f);
+        l.level = lvl > 0.0001f ? lvl : 0.4f;
+        k.layers[slot] = l;
+    }
+    writeParams (k);
+    if (! getPresetName().endsWith ("*")) setPresetName (getPresetName() + " *");
+    triggerFromUI();
+}
+
+void CiroKickProcessor::buildAll()
+{
+    pushHistory();
+    auto k = readParams();
+    std::uniform_int_distribution<int> body (0, (int) bodyCatNames().size() - 1);
+    applyBody (k, body (rng), rng);
+    std::uniform_real_distribution<float> u (0.0f, 1.0f);
+    for (int i = 0; i < numLayers; ++i)
+    {
+        if (u (rng) < (i < 2 ? 0.2f : 0.4f)) { k.layers[i].level = 0.0f; continue; }
+        std::uniform_int_distribution<int> type (0, (int) layerTypeNames (layerRole (i)).size() - 1);
+        auto l = layerDefaults (i, type (rng));
+        varyLayer (l, rng, 1.2f);
+        l.level = 0.15f + 0.3f * u (rng);
+        k.layers[i] = l;
+    }
+    writeParams (k);
+    setPresetName ("BUILD #" + juce::String (++randomCount));
+    triggerFromUI();
 }
 
 juce::String CiroKickProcessor::getPresetName() const

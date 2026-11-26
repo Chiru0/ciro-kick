@@ -194,14 +194,100 @@ inline void keepUserSettings (KickParams& p, const KickParams& current)
     p.keyTrack = current.keyTrack;
 }
 
+// ---------------------------------------------------------------- kick builder
+inline const std::vector<const char*>& bodyCatNames()
+{
+    static const std::vector<const char*> n { "STARTER", "PUNCHY", "TECHNO", "DISTORTED", "ROUNDED" };
+    return n;
+}
+
+// Typical settings for a layer category (decay, drive, tone, tune, start).
+inline LayerParams layerDefaults (int slot, int type)
+{
+    struct D { float dec, drv, tone, tune, start; };
+    static const D punch[] = { { 200, 26, 9000, 0, 0 }, { 140, 22, 3500, 0, 0 }, { 60, 6, 8000, 0, 0 }, { 45, 4, 6000, 0, 0 }, { 120, 14, 1800, 0, 0 } };
+    static const D tail[]  = { { 450, 6, 300, 0, 25 }, { 320, 24, 1800, 0, 30 }, { 70, 4, 500, 0, 0 }, { 150, 4, 450, 0, 105 },
+                               { 480, 26, 1100, 0, 25 }, { 300, 6, 600, 0, 60 }, { 260, 18, 2500, 0, 30 }, { 650, 10, 200, 0, 20 } };
+    static const D extra[] = { { 14, 6, 1200, 0, 0 }, { 300, 6, 600, 0, 0 }, { 420, 6, 280, 0, 0 }, { 320, 8, 1000, 0, 0 },
+                               { 60, 4, 1400, 0, 0 }, { 220, 0, 900, 0, 10 }, { 140, 18, 3500, 0, 0 } };
+    const int role = layerRole (slot);
+    const int n = (int) layerTypeNames (role).size();
+    type = std::clamp (type, 0, n - 1);
+    const D& d = role == 0 ? punch[type] : role == 1 ? tail[type] : extra[type];
+    LayerParams l;
+    l.type = type; l.level = 0.5f; l.decay = d.dec; l.drive = d.drv; l.tone = d.tone; l.tune = d.tune; l.start = d.start;
+    return l;
+}
+
+// Pushes a layer around inside its category. scale 1 = gentle.
+inline void varyLayer (LayerParams& l, std::mt19937& rng, float scale)
+{
+    std::uniform_real_distribution<float> u (-1.0f, 1.0f);
+    l.decay = std::clamp (l.decay * (1.0f + 0.3f * scale * u (rng)), 5.0f, 1500.0f);
+    l.drive = std::clamp (l.drive + 5.0f * scale * u (rng), 0.0f, 36.0f);
+    l.tone  = std::clamp (l.tone * std::pow (2.0f, 0.6f * scale * u (rng)), 80.0f, 12000.0f);
+    if (l.start > 0) l.start = std::clamp (l.start * (1.0f + 0.3f * scale * u (rng)), 0.0f, 500.0f);
+    if (std::abs (u (rng)) < 0.3f * scale) l.tune = std::clamp (l.tune + (u (rng) > 0 ? 12.0f : 7.0f) * (u (rng) > 0.4f ? 1.0f : 0.0f), -24.0f, 24.0f);
+}
+
+// Body categories from the builder: reshape the main kick's body.
+inline void applyBody (KickParams& p, int cat, std::mt19937& rng)
+{
+    static const char* specs[] = {
+        "start 450 sweep 45 curve 1.1 len 850 hold 60 shape 1.2 wave 0 sub .3 click .2 snap 4 ctone 3000 drive 3 type 0 mix 1 filter 12000 reso .7 punch 0",
+        "start 900 sweep 22 curve 1.6 len 420 hold 25 shape 1.8 wave .15 sub .2 click .55 snap 3 ctone 4500 drive 10 type 0 mix 1 filter 9000 reso 1 punch 4",
+        "start 700 sweep 28 curve 1.4 len 300 hold 20 shape 2.2 wave .2 sub .1 click .4 snap 2.5 ctone 5000 drive 8 type 0 mix .8 filter 7000 reso 1.2 punch 3",
+        "start 800 sweep 26 curve 1.4 len 520 hold 50 shape 1.1 wave .45 sub .5 click .5 snap 2.5 ctone 4000 drive 26 type 1 mix 1 filter 6000 reso 1.8 punch 8",
+        "start 380 sweep 55 curve 0.9 len 600 hold 70 shape 1.4 wave .1 sub .4 click .25 snap 5 ctone 2500 drive 6 type 0 mix 1 filter 5000 reso .9 punch 0" };
+    cat = std::clamp (cat, 0, 4);
+    KickParams b = kickSpec (specs[cat]);
+    varyKick (b, rng, 1.2f);
+    p.pitchStart = b.pitchStart; p.pitchDecay = b.pitchDecay; p.pitchCurve = b.pitchCurve; p.length = b.length;
+    p.hold = b.hold; p.shape = b.shape; p.wave = b.wave; p.sub = b.sub; p.clickLevel = b.clickLevel; p.clickDecay = b.clickDecay;
+    p.clickTone = b.clickTone; p.drive = b.drive; p.distType = b.distType; p.distMix = b.distMix; p.tone = b.tone; p.reso = b.reso;
+    p.punch = b.punch; p.bodyCat = cat;
+    for (int i = 0; i < 5; ++i) { p.envG[i] = 1.0f; }
+}
+
+// Per-genre builder recipes: { slot, type, level } x alternatives.
+struct LayerPick { int slot, type; float level; };
+inline const std::vector<std::vector<LayerPick>>& genreLayerRecipes (int genre)
+{
+    static const std::vector<std::vector<LayerPick>> r[numGenres] = {
+        { { { 0, 1, .30f }, { 2, 6, .22f }, { 3, 2, .18f } }, { { 0, 0, .25f }, { 2, 6, .28f } }, { { 2, 3, .22f }, { 3, 5, .15f } }, { { 0, 1, .35f }, { 1, 1, .2f }, { 2, 6, .2f } } },
+        { { { 0, 2, .25f }, { 2, 0, .25f } }, { { 0, 3, .3f }, { 1, 2, .3f } }, { { 2, 0, .3f }, { 3, 1, .15f } }, { { 0, 2, .2f }, { 1, 3, .3f } } },
+        { { { 0, 2, .3f }, { 1, 0, .35f }, { 2, 1, .2f } }, { { 1, 0, .4f }, { 2, 0, .2f } }, { { 0, 3, .25f }, { 1, 5, .3f } }, { { 0, 2, .25f }, { 3, 1, .25f } } },
+        { { { 0, 0, .45f }, { 1, 4, .4f }, { 2, 5, .18f } }, { { 0, 0, .4f }, { 1, 4, .35f } }, { { 0, 4, .3f }, { 1, 4, .3f }, { 2, 0, .2f } }, { { 0, 0, .35f }, { 1, 5, .3f } } },
+        { { { 0, 1, .3f }, { 2, 2, .25f } }, { { 0, 2, .25f }, { 1, 7, .3f }, { 2, 6, .15f } }, { { 0, 1, .3f }, { 1, 1, .2f } }, { { 2, 3, .25f }, { 3, 4, .15f } } },
+        { { { 0, 4, .3f }, { 1, 1, .3f } }, { { 0, 4, .35f }, { 2, 3, .2f } }, { { 1, 1, .35f }, { 2, 0, .2f } }, { { 0, 1, .3f }, { 1, 6, .25f } } },
+        { { { 0, 3, .3f }, { 2, 0, .25f } }, { { 2, 0, .3f }, { 3, 5, .15f } }, { { 0, 2, .25f }, { 2, 1, .2f } }, { { 0, 3, .25f }, { 2, 2, .15f } } },
+        { { { 0, 1, .4f }, { 2, 4, .3f } }, { { 0, 1, .35f }, { 1, 1, .25f }, { 2, 3, .2f } }, { { 1, 6, .3f }, { 2, 4, .25f } }, { { 0, 1, .4f }, { 1, 6, .3f }, { 2, 4, .3f }, { 3, 2, .2f } } },
+    };
+    return r[std::clamp (genre, 0, numGenres - 1)];
+}
+
+inline void applyRecipe (KickParams& p, int genre, int which, std::mt19937& rng, float vary)
+{
+    for (auto& l : p.layers) l.level = 0.0f;
+    const auto& rs = genreLayerRecipes (genre);
+    for (const auto& pick : rs[(size_t) (which % (int) rs.size())])
+    {
+        auto l = layerDefaults (pick.slot, pick.type);
+        l.level = pick.level;
+        if (vary > 0) { varyLayer (l, rng, vary); std::uniform_real_distribution<float> u (0.75f, 1.25f); l.level = std::clamp (l.level * u (rng), 0.0f, 1.0f); }
+        p.layers[pick.slot] = l;
+    }
+}
+
 inline KickParams presetParams (int genre, int index, const KickParams& current)
 {
     genre = std::clamp (genre, 0, numGenres - 1);
     index = std::clamp (index, 0, 19);
     KickParams p = presetBank().archetypes[(size_t) genre][(size_t) (index / 5)];
     keepUserSettings (p, current);
-    if (index % 5 == 0) return p;
     std::mt19937 rng ((uint32_t) (genre * 1000 + index * 7 + 1));
+    applyRecipe (p, genre, index / 5, rng, index % 5 == 0 ? 0.0f : 0.6f);
+    if (index % 5 == 0) return p;
     varyKick (p, rng, 1.0f);
     // tune each variation to a different note in the genre range
     const auto& g = genreProfiles()[(size_t) genre];
@@ -218,6 +304,7 @@ inline KickParams randomKick (int genre, std::mt19937& rng, const KickParams& cu
     KickParams p = presetBank().archetypes[(size_t) genre][(size_t) pick (rng)];
     keepUserSettings (p, current);
     varyKick (p, rng, 2.0f);
+    applyRecipe (p, genre, pick (rng), rng, 1.5f);
     const auto& g = genreProfiles()[(size_t) genre];
     std::uniform_real_distribution<float> t (g.tuneLo, g.tuneHi);
     p.pitchEnd = t (rng);
@@ -229,5 +316,7 @@ inline KickParams mutateKick (const KickParams& current, std::mt19937& rng)
 {
     KickParams p = current;
     varyKick (p, rng, 0.7f);
+    for (auto& l : p.layers) if (l.level > 0) varyLayer (l, rng, 0.5f);
     return p;
 }
+

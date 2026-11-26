@@ -23,7 +23,44 @@ struct SVF
         ic2 = 2 * v2 - ic2;
         return v2;
     }
+    // returns low-pass, writes band-pass and high-pass
+    double multi (double x, double fc, double sr, double q, double& bp, double& hp)
+    {
+        const double g = std::tan (3.14159265358979 * std::clamp (fc, 10.0, sr * 0.45) / sr);
+        const double k = 1.0 / q;
+        const double a1 = 1.0 / (1.0 + g * (g + k)), a2 = g * a1, a3 = g * a2;
+        const double v3 = x - ic2;
+        const double v1 = a1 * ic1 + a2 * v3;
+        const double v2 = ic2 + a2 * ic1 + a3 * v3;
+        ic1 = 2 * v1 - ic1;
+        ic2 = 2 * v2 - ic2;
+        bp = v1; hp = x - k * v1 - v2;
+        return v2;
+    }
 };
+
+// Kick builder layers stacked on the main kick body.
+// slot 0 = PUNCH, 1 = TAIL, 2/3 = EXTRA (enhancers)
+constexpr int numLayers = 4;
+struct LayerParams
+{
+    int   type  = 0;
+    float level = 0.0f;     // 0..1 (0 = off)
+    float tune  = 0.0f;     // semitones
+    float decay = 200.0f;   // ms
+    float drive = 12.0f;    // dB
+    float tone  = 3000.0f;  // Hz
+    float start = 0.0f;     // ms offset
+};
+
+inline int layerRole (int slot) { return slot < 2 ? slot : 2; }
+inline const std::vector<const char*>& layerTypeNames (int role)
+{
+    static const std::vector<const char*> punch { "HARDSTYLISH", "INDUSTRIAL", "TOP KICK", "TRANSIENT", "TOKYO SNAP" };
+    static const std::vector<const char*> tail  { "BIGROOM", "IND CRUNCH", "PSY ROLL", "PSY SHOT", "RAW CRUNCH", "REVERSE", "ROBOT", "RUMBLE" };
+    static const std::vector<const char*> extra { "CLICK", "LOW MID", "NOISE", "NOISE 2", "RESONATOR", "REVERB", "SCHRANZ TOP" };
+    return role == 0 ? punch : role == 1 ? tail : extra;
+}
 
 // Plain snapshot of every sound parameter (units are the ones shown in the UI).
 struct KickParams
@@ -84,6 +121,9 @@ struct KickParams
     // transient shaper: gain nodes over the kick length
     float envT[5] = { 0.0f, 0.04f, 0.12f, 0.35f, 0.7f };
     float envG[5] = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
+
+    LayerParams layers[numLayers];
+    int bodyCat = 0;            // builder body category (only used by the generator)
 
     float volume     = -3.0f;   // dB
     bool  keyTrack   = false;
@@ -278,6 +318,299 @@ private:
     double metalPh[5] {};
 };
 
+
+// One builder layer, synthesised per category.
+class LayerVoice
+{
+public:
+    void setSampleRate (double sr) { sampleRate = sr; }
+    void trigger (const LayerParams& p, int slotIndex, double baseHz, double beatSamples, float velocity)
+    {
+        lp = p; role = layerRole (slotIndex); vel = velocity;
+        base = baseHz * std::pow (2.0, p.tune / 12.0);
+        beat = beatSamples;
+        t = 0; ph = ph2 = ph3 = 0; held = 0; holdCount = 0;
+        f1.reset(); f2.reset(); f3.reset(); f4.reset(); nlp = 0;
+        fade = 1.0f; fadeStep = 0.0f;
+        active = p.level > 0.0001f;
+    }
+    void release() { if (active) fadeStep = 1.0f / (float) (0.004 * sampleRate); }
+
+    float next()
+    {
+        if (! active) return 0.0f;
+        const double ms = t / sampleRate * 1000.0 - lp.start;
+        t += 1.0;
+        if (ms < 0.0) return 0.0f;
+        const double sec = ms * 0.001;
+        const double dec = std::max (2.0f, lp.decay);
+        const double g = std::pow (10.0, lp.drive / 20.0);
+        double out = 0.0;
+        bool done = false;
+
+        auto noise = [this] { seed = seed * 1664525u + 1013904223u; return (double) ((seed >> 9) * (1.0 / 4194304.0) - 1.0); };
+        auto osc = [this] (double& phase, double f) { phase += f / sampleRate; phase -= std::floor (phase); return std::sin (phase * 6.283185307179586); };
+        auto saw = [this] (double& phase, double f)
+        {
+            const double dt = f / sampleRate;
+            phase += dt; phase -= std::floor (phase);
+            double o = 2.0 * phase - 1.0;
+            if (phase < dt) { const double x = phase / dt; o -= x + x - x * x - 1.0; }
+            else if (phase > 1.0 - dt) { const double x = (phase - 1.0) / dt; o -= x * x + x + x + 1.0; }
+            return o;
+        };
+        auto decayEnv = [&] (double hold, double shape)
+        {
+            if (ms < 0.4) return ms / 0.4;
+            if (ms < hold) return 1.0;
+            const double x = (ms - hold) / std::max (1.0, dec - hold);
+            if (x >= 1.0) { done = true; return 0.0; }
+            return std::pow (1.0 - x, shape);
+        };
+        auto fadeIn = [&] (double len) { return std::min (1.0, ms / len); };
+        auto crush = [this] (double x, int every, double steps)
+        {
+            if (holdCount <= 0) { held = std::round (x * steps) / steps; holdCount = every; }
+            --holdCount; return held;
+        };
+        double bp, hp;
+
+        if (role == 0) // ---------------- PUNCH
+        {
+            switch (lp.type)
+            {
+                case 0: // HARDSTYLISH: screaming mid punch, distorted and band-limited
+                {
+                    const double f = base * 3.0 * (1.0 + 5.0 * std::exp (-ms / 12.0));
+                    double x = std::tanh (osc (ph, f) * g * 1.5);
+                    x = std::tanh (x * 2.5 + 0.5 * osc (ph2, f * 2.01) + 0.25 * (osc (ph3, f * 3.02) > 0 ? 1.0 : -1.0));
+                    f1.multi (x, 520.0, sampleRate, 0.7, bp, hp); x = hp;
+                    x = f2.lowpass (x, lp.tone, sampleRate, 1.2);
+                    out = x * decayEnv (6.0, 2.0) * 0.45;
+                    break;
+                }
+                case 1: // INDUSTRIAL: hard-clipped square body with clank
+                {
+                    const double f = base * 2.0 * (1.0 + 3.0 * std::exp (-ms / 8.0));
+                    double x = std::tanh (4.0 * osc (ph, f)) + 0.35 * (osc (ph2, f * 2.73) > 0 ? 1.0 : -1.0) * std::exp (-ms / 30.0);
+                    x = std::clamp (x * g * 0.5, -1.0, 1.0);
+                    x = f1.lowpass (x, lp.tone, sampleRate, 1.6);
+                    f2.multi (x, 30.0, sampleRate, 0.7, bp, hp);
+                    out = hp * decayEnv (12.0, 1.4) * 0.4;
+                    break;
+                }
+                case 2: // TOP KICK: short higher kick layered on top
+                {
+                    const double f = base * 2.3 * (1.0 + 6.0 * std::exp (-ms / 6.0));
+                    double x = std::tanh (osc (ph, f) * (1.0 + g * 0.3));
+                    x += noise() * std::exp (-ms / 1.5) * 0.5;
+                    x = f1.lowpass (x, lp.tone, sampleRate, 0.8);
+                    f2.multi (x, 80.0, sampleRate, 0.7, bp, hp);
+                    out = hp * decayEnv (2.0, 2.5) * 0.7;
+                    break;
+                }
+                case 3: // TRANSIENT: very fast pitch drop burst
+                {
+                    const double f = base * 2.0 * (1.0 + 2.5 * std::exp (-ms / 5.0));
+                    double x = std::tanh (osc (ph, f) * (1.0 + g * 0.2)) + noise() * std::exp (-ms / 4.0) * 0.6;
+                    x = f1.lowpass (x, lp.tone, sampleRate, 0.9);
+                    f2.multi (x, 50.0, sampleRate, 0.7, bp, hp);
+                    out = hp * decayEnv (1.0, 3.0) * 0.9;
+                    break;
+                }
+                default: // TOKYO SNAP: folded, nasal punch
+                {
+                    const double f = base * 4.0 * (1.0 + 2.0 * std::exp (-ms / 10.0));
+                    double x = std::sin (osc (ph, f) * (1.0 + g * 0.25) * 1.5707963);
+                    x = f1.multi (x, lp.tone, sampleRate, 3.0, bp, hp) * 0.4 + bp * 0.8;
+                    out = std::tanh (x * 1.5) * decayEnv (4.0, 2.0) * 0.7;
+                    break;
+                }
+            }
+        }
+        else if (role == 1) // ---------------- TAIL
+        {
+            const double f = base;
+            switch (lp.type)
+            {
+                case 0: // BIGROOM: round long sine bass
+                {
+                    const double fr = f * (1.0 + 0.5 * std::exp (-ms / 25.0));
+                    double x = std::tanh (osc (ph, fr) * (1.0 + g * 0.25)) + 0.12 * saw (ph2, fr);
+                    x = f1.lowpass (x, lp.tone, sampleRate, 0.7);
+                    out = x * decayEnv (dec * 0.3, 1.5) * fadeIn (4.0) * 0.8;
+                    break;
+                }
+                case 1: // IND CRUNCH: clipped, crushed, noisy low end
+                {
+                    double x = osc (ph, f) + 0.5 * (osc (ph2, f) > 0 ? 1.0 : -1.0);
+                    nlp += (noise() - nlp) * 0.004;
+                    x = std::clamp (x * g * (1.0 + nlp * 6.0), -1.0, 1.0);
+                    x = crush (x, 3, 10.0);
+                    x = f1.lowpass (x, lp.tone, sampleRate, 1.1);
+                    f2.multi (x, 55.0, sampleRate, 0.7, bp, hp);
+                    out = hp * decayEnv (dec * 0.2, 1.0) * fadeIn (3.0) * 0.35;
+                    break;
+                }
+                case 2: // PSY ROLL: three 1/16 plucks after the kick
+                {
+                    const double pos = (t - lp.start * 0.001 * sampleRate) / std::max (1.0, beat);
+                    const int step = (int) std::floor (pos * 4.0);
+                    if (step >= 4) { done = true; break; }
+                    if (step >= 1)
+                    {
+                        const double nms = (pos * 4.0 - step) * beat / 4.0 / sampleRate * 1000.0;
+                        const double e = nms < 1.0 ? nms : std::max (0.0, 1.0 - (nms - 1.0) / dec);
+                        double x = saw (ph, f * (1.0 + 0.04 * std::exp (-nms / 6.0)));
+                        x = f1.lowpass (x, lp.tone * (1.0 + 5.0 * std::exp (-nms / 15.0)), sampleRate, 1.4);
+                        out = std::tanh (x * (1.0 + g * 0.2)) * e * e * 1.1;
+                    }
+                    break;
+                }
+                case 3: // PSY SHOT: one filtered pluck
+                {
+                    double x = saw (ph, f) * 0.7 + 0.3 * saw (ph2, f * 1.005);
+                    x = f1.lowpass (x, lp.tone * (1.0 + 6.0 * std::exp (-ms / 20.0)), sampleRate, 1.3);
+                    out = std::tanh (x * (1.0 + g * 0.2)) * decayEnv (2.0, 2.0) * fadeIn (1.0) * 1.1;
+                    break;
+                }
+                case 4: // RAW CRUNCH: screeching distorted tail with a vocal formant
+                {
+                    const double len = std::max (1.0, (double) dec);
+                    const double fr = f * std::pow (2.0, -2.0 * std::min (1.0, ms / len) / 12.0);
+                    double x = std::tanh (osc (ph, fr) * g * 2.0);
+                    x = std::sin (x * 2.2);
+                    const double low = f1.multi (x, lp.tone, sampleRate, 3.0, bp, hp);
+                    x = low * 0.5 + bp * 0.9;
+                    f2.multi (x, 80.0, sampleRate, 0.7, bp, hp);
+                    out = std::tanh (hp * 1.5) * decayEnv (dec * 0.5, 0.8) * fadeIn (5.0) * 0.9;
+                    break;
+                }
+                case 5: // REVERSE: swells up into the next kick
+                {
+                    const double total = std::max (1.0, beat * 0.95 - lp.start * 0.001 * sampleRate);
+                    const double u = (t - lp.start * 0.001 * sampleRate) / total;
+                    if (u >= 1.0) { done = true; break; }
+                    double x = std::tanh ((1.0 + g * 0.2) * osc (ph, f));
+                    x = f1.lowpass (x, lp.tone * (0.3 + u), sampleRate, 0.9);
+                    out = x * std::pow (u, 2.2) * std::min (1.0, (1.0 - u) * 40.0) * 0.9;
+                    break;
+                }
+                case 6: // ROBOT: FM + ring mod, bit crushed
+                {
+                    const double idx = 3.0 * std::exp (-ms / 80.0) + 0.6;
+                    const double m = osc (ph2, f * 2.01);
+                    ph += (f * (1.0 + idx * m * 0.5)) / sampleRate; ph -= std::floor (ph);
+                    double x = std::sin (ph * 6.283185307179586) * (0.7 + 0.3 * (osc (ph3, f * 7.0) > 0 ? 1.0 : -1.0));
+                    x = crush (std::tanh (x * g * 0.6), 4, 8.0);
+                    x = f1.lowpass (x, lp.tone, sampleRate, 1.0);
+                    out = x * decayEnv (dec * 0.25, 1.2) * fadeIn (3.0) * 0.6;
+                    break;
+                }
+                default: // RUMBLE: dark, wobbling, saturated sub
+                {
+                    nlp += (noise() - nlp) * 0.002;
+                    double x = osc (ph, f * (1.0 + nlp * 0.3)) * (1.0 + nlp * 2.0);
+                    x = std::tanh (x * (1.0 + g * 0.5));
+                    x = f1.lowpass (f2.lowpass (x, lp.tone, sampleRate, 0.7), lp.tone, sampleRate, 0.7);
+                    out = x * decayEnv (dec * 0.2, 1.0) * fadeIn (12.0) * 0.55;
+                    break;
+                }
+            }
+        }
+        else // ---------------- EXTRA / ENHANCERS
+        {
+            switch (lp.type)
+            {
+                case 0: // CLICK
+                {
+                    double x = noise() * std::exp (-ms / std::max (0.3, dec * 0.15));
+                    f1.multi (x, lp.tone, sampleRate, 1.5, bp, hp);
+                    const double tick = std::sin (6.283185307 * lp.tone * 0.5 * sec) * std::exp (-ms / std::max (0.2, dec * 0.08));
+                    out = std::tanh ((bp * 1.2 + tick * 0.7) * (1.0 + g * 0.1)) * (ms < dec ? 1.0 : (done = true, 0.0));
+                    break;
+                }
+                case 1: // LOW MID: thick 100-200 Hz bump
+                {
+                    const double f = 175.0 * std::pow (2.0, lp.tune / 12.0) * (1.0 + 0.6 * std::exp (-ms / 10.0));
+                    double x = std::tanh (osc (ph, f) * (1.0 + g * 0.3));
+                    x = f1.lowpass (x, lp.tone, sampleRate, 0.8);
+                    out = x * decayEnv (dec * 0.15, 1.6) * 0.6;
+                    break;
+                }
+                case 2: // NOISE: body-band noise smear
+                {
+                    double x = f1.multi (noise(), lp.tone, sampleRate, 1.2, bp, hp);
+                    x = std::tanh (bp * (1.5 + g * 0.3));
+                    out = x * decayEnv (5.0, 1.8) * 1.4;
+                    break;
+                }
+                case 3: // NOISE 2: crunchy mid noise
+                {
+                    double x = noise();
+                    x = crush (std::tanh (x * (1.0 + g * 0.4)), 2, 6.0);
+                    f1.multi (x, lp.tone, sampleRate, 0.9, bp, hp);
+                    out = bp * decayEnv (3.0, 2.2) * 1.2;
+                    break;
+                }
+                case 4: // RESONATOR: ringing metallic body
+                {
+                    const double exc = noise() * (ms < 2.0 ? 1.0 : 0.0) + (ms < 0.1 ? 4.0 : 0.0);
+                    f1.multi (exc, lp.tone, sampleRate, 40.0, bp, hp); double a = bp;
+                    f2.multi (exc, lp.tone * 1.51, sampleRate, 30.0, bp, hp); double b = bp;
+                    f3.multi (exc, lp.tone * 2.37, sampleRate, 25.0, bp, hp);
+                    double x = (a + b * 0.35 + bp * 0.15) * 2.5;
+                    out = std::tanh (x * (1.0 + g * 0.2)) * decayEnv (0.5, 1.5) * 0.55;
+                    break;
+                }
+                case 5: // REVERB: short room smear after the hit
+                {
+                    double x = noise() * (0.6 + 0.4 * std::sin (ms * 0.37));
+                    x = f1.lowpass (x, lp.tone, sampleRate, 0.7);
+                    f2.multi (x, 180.0, sampleRate, 0.7, bp, hp);
+                    out = hp * decayEnv (2.0, 2.5) * fadeIn (6.0) * 2.4 * (1.0 + g * 0.02);
+                    break;
+                }
+                default: // SCHRANZ TOP: driven 1/16 metallic stabs over the beat
+                {
+                    const double pos = (t - lp.start * 0.001 * sampleRate) / std::max (1.0, beat);
+                    if (pos >= 1.0) { done = true; break; }
+                    const double nms = (pos * 4.0 - std::floor (pos * 4.0)) * beat / 4.0 / sampleRate * 1000.0;
+                    const int step = (int) std::floor (pos * 4.0);
+                    const double acc = step == 2 ? 1.0 : 0.7;
+                    double x = (osc (ph, lp.tone * 0.25) > 0 ? 1.0 : -1.0) * 0.5 + (osc (ph2, lp.tone * 0.37) > 0 ? 0.5 : -0.5) + noise() * 0.6;
+                    x = std::tanh (x * (1.0 + g * 0.5));
+                    f1.multi (x, lp.tone, sampleRate, 1.2, bp, hp);
+                    f2.multi (bp + hp * 0.3, 900.0, sampleRate, 0.7, bp, hp);
+                    const double e = std::exp (-nms / std::max (5.0, dec * 0.3)) * std::min (1.0, nms / 0.5);
+                    out = hp * e * acc * 1.0;
+                    break;
+                }
+            }
+        }
+
+        out *= lp.level * vel;
+        if (fadeStep > 0.0f)
+        {
+            fade -= fadeStep;
+            if (fade <= 0.0f) { active = false; return 0.0f; }
+            out *= fade;
+        }
+        if (done || ms > 4000.0) active = false;
+        return (float) out;
+    }
+
+private:
+    LayerParams lp;
+    int role = 0;
+    double sampleRate = 44100.0, t = 0, ph = 0, ph2 = 0, ph3 = 0, base = 50, beat = 20000, held = 0, nlp = 0;
+    int holdCount = 0;
+    float vel = 1.0f, fade = 1.0f, fadeStep = 0.0f;
+    bool active = false;
+    uint32_t seed = 4242u;
+    SVF f1, f2, f3, f4;
+};
+
 // Linear interpolation through 5 (time, gain) nodes; holds the last gain afterwards.
 inline double envNodes (const float* T, const float* G, double x)
 {
@@ -445,6 +778,7 @@ public:
         for (auto& v : voices) v.setSampleRate (sr);
         bass.setSampleRate (sr);
         rumble.setSampleRate (sr);
+        for (auto& b : layerVoices) for (auto& l : b) l.setSampleRate (sr);
     }
     void setParams (const KickParams& p) { params = p; }
 
@@ -460,11 +794,16 @@ public:
         eventIdx = 0;
         bassHz = voices[cur].getBaseHz() * std::pow (2.0, p.bassSemi / 12.0);
         bassVel = vel;
+        for (auto& l : layerVoices[curL]) l.release();
+        curL ^= 1;
+        for (int i = 0; i < numLayers; ++i)
+            layerVoices[curL][i].trigger (p.layers[i], i, voices[cur].getBaseHz(), beat, vel * (float) std::pow (10.0, p.volume / 20.0));
     }
 
     void next (float& kick, float& bassOut, float& rumbleOut)
     {
         kick = voices[0].next() + voices[1].next();
+        for (auto& b : layerVoices) for (auto& l : b) kick += l.next();
         if (params.bassLevel > 0.0001f)
         {
             static const double ev[4][3] = { { 0.25, 0.5, 0.75 }, { 0.5, -1, -1 }, { 0.5, 0.75, -1 }, { 0.12, -1, -1 } };
@@ -493,8 +832,9 @@ public:
 private:
     double sampleRate = 44100.0, beat = 20000, sinceKick = 1e9, bassHz = 50;
     float bassVel = 1.0f;
-    int cur = 0, eventIdx = 3;
+    int cur = 0, eventIdx = 3, curL = 0;
     KickVoice voices[2];
+    LayerVoice layerVoices[2][numLayers];
     BassVoice bass;
     Rumble rumble;
     KickParams params;

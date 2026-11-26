@@ -40,6 +40,9 @@ public:
     int getGenre() const;
     void loadPreset (int genre, int index);
     void mutate();
+    void setLayerType (int slot, int type); // slot -1 = body
+    void rollLayer (int slot);
+    void buildAll();
     void setSteps (juce::int64 mask);
     juce::int64 getSteps() const { return steps.load(); }
     void setLoopLength (int len);
@@ -57,6 +60,7 @@ private:
     void startKick (float velocity, int note);
 
     void setPresetName (const juce::String&);
+    void pushHistory();
     GrooveEngine engine;
     int randomCount = 0;
     std::atomic<juce::int64> steps { 0x11111111 };
