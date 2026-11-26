@@ -39,6 +39,10 @@ public:
     void triggerFromUI() { uiTrigger = true; }
     int getGenre() const;
     void loadPreset (int genre, int index);
+    void mutate();
+    void setSteps (int mask);
+    int getSteps() const { return steps.load(); }
+    std::atomic<int> currentStep { -1 };
     juce::String getPresetName() const;
     int presetIndex = -1;
     std::atomic<double> bpm { 145.0 };
@@ -53,6 +57,9 @@ private:
     void setPresetName (const juce::String&);
     GrooveEngine engine;
     int randomCount = 0;
+    std::atomic<int> steps { 0x1111 };
+    double loopPpq = 0.0, sampleRateHz = 44100.0;
+    int lastStep = -1;
     std::atomic<bool> uiTrigger { false };
     std::mt19937 rng { std::random_device{}() };
     std::vector<std::pair<KickParams, juce::String>> history;

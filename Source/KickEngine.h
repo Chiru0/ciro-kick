@@ -6,6 +6,25 @@
 #include <algorithm>
 #include <vector>
 
+// Zero-delay-feedback state-variable filter.
+struct SVF
+{
+    double ic1 = 0, ic2 = 0;
+    void reset() { ic1 = ic2 = 0; }
+    double lowpass (double x, double fc, double sr, double q = 0.8)
+    {
+        const double g = std::tan (3.14159265358979 * std::clamp (fc, 10.0, sr * 0.45) / sr);
+        const double k = 1.0 / q;
+        const double a1 = 1.0 / (1.0 + g * (g + k)), a2 = g * a1, a3 = g * a2;
+        const double v3 = x - ic2;
+        const double v1 = a1 * ic1 + a2 * v3;
+        const double v2 = ic2 + a2 * ic1 + a3 * v3;
+        ic1 = 2 * v1 - ic1;
+        ic2 = 2 * v2 - ic2;
+        return v2;
+    }
+};
+
 // Plain snapshot of every sound parameter (units are the ones shown in the UI).
 struct KickParams
 {
@@ -28,18 +47,25 @@ struct KickParams
     int   distType   = 0;       // 0 Soft, 1 Hard, 2 Fold, 3 Crush
     float distMix    = 1.0f;    // 0..1
     float tone       = 12000.0f;// Hz low-pass after drive
+    float reso       = 0.7f;    // filter resonance (Q)
+    float punch      = 0.0f;    // ms of clean attack before the distortion kicks in
 
     float rumbleAmt   = 0.0f;   // 0..1 (0 = off)
     float rumbleSize  = 0.75f;  // 0..1 reverb size
     float rumbleDrive = 16.0f;  // dB
     float rumbleTone  = 140.0f; // Hz low-pass
     float rumbleDuck  = 0.7f;   // 0..1 sidechain under the kick
+    float rumbleRoll  = 0.0f;   // 0..1 sixteenth-note gating
 
     int   bassPattern = 0;      // 0 Rolling, 1 Offbeat, 2 Gallop, 3 Reverse
     float bassLevel   = 0.0f;   // 0..1 (0 = off)
     float bassSemi    = 0.0f;   // semitones from the kick tune
     float bassDecay   = 110.0f; // ms
     float bassCutoff  = 800.0f; // Hz
+
+    // transient shaper: gain nodes over the kick length
+    float envT[5] = { 0.0f, 0.04f, 0.12f, 0.35f, 0.7f };
+    float envG[5] = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
 
     float volume     = -3.0f;   // dB
     bool  keyTrack   = false;
@@ -64,6 +90,7 @@ public:
         fadeStep = 0.0f;
         bp1 = bp2 = 0.0f;
         lp = 0.0f;
+        toneFilter.reset();
         crushHold = 0.0f;
         crushCount = 0;
     }
@@ -119,6 +146,20 @@ public:
             amp = x >= 1.0 ? 0.0 : std::pow (1.0 - x, (double) params.shape);
         }
 
+        // transient shaper nodes
+        {
+            const double x = ms / lenMs;
+            double gain = params.envG[4];
+            if (x <= params.envT[0]) gain = params.envG[0];
+            else
+                for (int i = 0; i < 4; ++i)
+                {
+                    const double t0 = params.envT[i], t1 = std::max (params.envT[i + 1], params.envT[i] + 1.0e-4f);
+                    if (x < t1) { gain = params.envG[i] + (params.envG[i + 1] - params.envG[i]) * (x - t0) / (t1 - t0); break; }
+                }
+            amp *= gain;
+        }
+
         double body = osc * amp;
 
         // ---- distortion on the body
@@ -141,12 +182,13 @@ public:
         }
         // keep loudness roughly even as drive rises
         const double comp = params.distType == 0 ? 1.0 : 0.9;
-        double shaped = body + (d * comp - body) * params.distMix;
+        double mix = params.distMix;
+        if (params.punch > 0.0f) mix *= std::clamp ((ms - params.punch * 0.5) / (params.punch * 0.5 + 0.001), 0.0, 1.0);
+        double shaped = body + (d * comp - body) * mix;
 
-        // ---- tone (one-pole low-pass)
-        const double a = 1.0 - std::exp (-2.0 * 3.14159265358979 * params.tone / sampleRate);
-        lp += (float) (a * (shaped - lp));
-        double out = lp;
+        // ---- tone: resonant low-pass, resonance tamed on the clean punch
+        double out = toneFilter.lowpass (shaped, params.tone, sampleRate, std::max (0.5f, params.reso));
+        if (params.reso > 1.0f) out /= std::sqrt (params.reso);
 
         // ---- click / transient: filtered noise burst
         if (params.clickLevel > 0.0f && ms < params.clickDecay * 8.0)
@@ -164,7 +206,9 @@ public:
             bp2 = (float) (2 * v2 - bp2);
             const double band = v1;
             const double cEnv = std::exp (-ms / std::max (0.3f, params.clickDecay));
-            out += band * 1.4 * cEnv * params.clickLevel;
+            // 909-style tick: short sine burst at the click tone plus a bit of noise
+            const double tick = std::sin (6.283185307 * params.clickTone * 0.5 * sec) * std::exp (-ms / std::max (0.2f, params.clickDecay * 0.4f));
+            out += (band * 0.6 * cEnv + tick * 0.5) * params.clickLevel;
         }
 
         out *= std::pow (10.0, params.volume / 20.0) * vel;
@@ -194,25 +238,7 @@ private:
     float crushHold = 0.0f;
     int crushCount = 0;
     uint32_t seed = 22222u;
-};
-
-// Zero-delay-feedback state-variable filter.
-struct SVF
-{
-    double ic1 = 0, ic2 = 0;
-    void reset() { ic1 = ic2 = 0; }
-    double lowpass (double x, double fc, double sr, double q = 0.8)
-    {
-        const double g = std::tan (3.14159265358979 * std::clamp (fc, 10.0, sr * 0.45) / sr);
-        const double k = 1.0 / q;
-        const double a1 = 1.0 / (1.0 + g * (g + k)), a2 = g * a1, a3 = g * a2;
-        const double v3 = x - ic2;
-        const double v1 = a1 * ic1 + a2 * v3;
-        const double v2 = ic2 + a2 * ic1 + a3 * v3;
-        ic1 = 2 * v1 - ic1;
-        ic2 = 2 * v2 - ic2;
-        return v2;
-    }
+    SVF toneFilter;
 };
 
 // Bass notes that play between kicks.
@@ -285,11 +311,14 @@ public:
         lp1.reset(); lp2.reset(); hp = 0; env = 0;
     }
 
-    float process (float in, const KickParams& p)
+    float process (float in, const KickParams& p, double rollPhase)
     {
         if (p.rumbleAmt <= 0.0001f) { env = 0; return 0.0f; }
         const float fb = 0.70f + 0.28f * p.rumbleSize, damp = 0.35f;
-        const float x = in * 0.2f;
+        // grit: noise riding the kick, more with dirt
+        seed = seed * 1664525u + 1013904223u;
+        const float noise = (float) ((seed >> 9) * (1.0 / 4194304.0) - 1.0);
+        const float x = in * 0.2f + noise * std::abs (in) * 0.05f * (p.rumbleDrive / 30.0f);
         float sum = 0;
         for (int i = 0; i < 4; ++i)
         {
@@ -319,7 +348,10 @@ public:
         const float a = std::abs (in);
         env = a > env ? a : env * (float) std::exp (-1.0 / (0.08 * sampleRate));
         const double duck = 1.0 - p.rumbleDuck * std::min (1.0f, env * 1.5f);
-        return (float) (y * duck * p.rumbleAmt * 1.4);
+        // roll: pumping 16th notes
+        const double ph = rollPhase - std::floor (rollPhase);
+        const double roll = 1.0 - p.rumbleRoll * (1.0 - std::pow (1.0 - ph, 1.5));
+        return (float) (y * duck * roll * p.rumbleAmt * 1.4);
     }
 
 private:
@@ -330,6 +362,7 @@ private:
     SVF lp1, lp2;
     double hp = 0;
     float env = 0;
+    uint32_t seed = 777u;
 };
 
 // Kick + bass pattern + rumble, used by the plugin and the display.
@@ -375,7 +408,7 @@ public:
             }
         }
         bassOut = bass.next() * (float) std::pow (10.0, params.volume / 20.0);
-        rumbleOut = rumble.process (kick, params);
+        rumbleOut = rumble.process (kick, params, sinceKick / (beat * 0.25));
         sinceKick += 1.0;
     }
 

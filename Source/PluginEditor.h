@@ -108,17 +108,79 @@ private:
     juce::Random rnd;
 };
 
+// Cartoon of Ciro that spins when clicked.
+class FaceLogo : public juce::Component
+{
+public:
+    juce::Colour accent { 0xffff3b5c };
+    std::function<void()> onClick;
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    bool animate();
+private:
+    float angle = 0.0f, spinVel = 0.0f, squash = 0.0f, tongue = 0.0f;
+};
+
+// Drag the puck: X = dark..bright, Y = clean..dirty.
+class XYPad : public juce::Component
+{
+public:
+    explicit XYPad (CiroKickProcessor& p) : proc (p) {}
+    juce::Colour accent { 0xffff3b5c };
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    bool animate();
+private:
+    void apply (juce::Point<float>);
+    juce::Point<float> puckFromParams() const;
+    CiroKickProcessor& proc;
+    std::vector<juce::Point<float>> trail;
+    juce::Point<float> shown { 0.5f, 0.5f };
+    bool dragging = false;
+    float pulse = 0.0f;
+};
+
+// 16-step pattern for the LOOP preview.
+class StepStrip : public juce::Component
+{
+public:
+    explicit StepStrip (CiroKickProcessor& p) : proc (p) {}
+    juce::Colour accent { 0xffff3b5c };
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    bool animate();
+private:
+    int stepAt (float x) const;
+    CiroKickProcessor& proc;
+    int paintValue = 1, lastPainted = -1, lastStep = -2;
+    float flashes[16] {};
+};
+
 class WaveDisplay : public juce::Component
 {
 public:
     explicit WaveDisplay (CiroKickProcessor& p) : proc (p) {}
     void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void mouseMove (const juce::MouseEvent&) override;
+    void mouseExit (const juce::MouseEvent&) override { hoverNode = -1; repaint(); }
+    void mouseDoubleClick (const juce::MouseEvent&) override;
     void update (juce::Colour accent, double nowMs);
     void hit (double nowMs) { lastHitMs = nowMs; shake = 1.0f; }
 
 private:
     void render (const KickParams&, double bpm);
+    juce::Rectangle<float> waveArea() const;
+    juce::Point<float> nodePos (int i) const;
+    int nodeAt (juce::Point<float>) const;
+    void setNode (int i, float t, float g);
     CiroKickProcessor& proc;
+    int dragNode = -1, hoverNode = -1;
     KickParams cached;
     double cachedBpm = 0;
     bool hasCache = false;
@@ -149,6 +211,11 @@ private:
     WaveDisplay display;
     std::vector<std::unique_ptr<FunKnob>> knobs;
     std::map<juce::String, FunKnob*> knobById;
+    FaceLogo face;
+    XYPad xyPad;
+    StepStrip stepStrip;
+    FunButton mutateBtn, loopBtn;
+    std::unique_ptr<juce::ParameterAttachment> loopAtt;
     FunButton randomBtn, undoBtn, distTypeBtn, keyTrackBtn, bassPatBtn, presetBtn, prevBtn, nextBtn;
     PlayPad playBtn;
     Particles particles;

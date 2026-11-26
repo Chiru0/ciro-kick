@@ -36,11 +36,14 @@ APVTS::ParameterLayout CiroKickProcessor::createLayout()
                                                                juce::StringArray { "SOFT", "HARD", "FOLD", "CRUSH" }, 0));
     add ("dMix",   "Drive Mix",   juce::NormalisableRange<float> (0.0f, 1.0f), 1.0f);
     add ("tone",   "Tone",        skewed (300.0f, 20000.0f, 3000.0f), 12000.0f, "Hz");
+    add ("reso",   "Resonance",   skewed (0.5f, 8.0f, 1.5f), 0.7f);
+    add ("punch",  "Punch",       juce::NormalisableRange<float> (0.0f, 120.0f), 0.0f, "ms");
     add ("rAmt",   "Rumble Amount", juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f);
     add ("rSize",  "Rumble Size",   juce::NormalisableRange<float> (0.0f, 1.0f), 0.75f);
     add ("rDrive", "Rumble Drive",  juce::NormalisableRange<float> (0.0f, 30.0f), 16.0f, "dB");
     add ("rTone",  "Rumble Tone",   skewed (40.0f, 400.0f, 140.0f), 140.0f, "Hz");
     add ("rDuck",  "Rumble Duck",   juce::NormalisableRange<float> (0.0f, 1.0f), 0.7f);
+    add ("rRoll",  "Rumble Roll",   juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f);
     p.push_back (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "bPat", 1 }, "Bass Pattern",
                                                                juce::StringArray { "ROLLING", "OFFBEAT", "GALLOP", "REVERSE" }, 0));
     add ("bLevel", "Bass Level",    juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f);
@@ -50,7 +53,17 @@ APVTS::ParameterLayout CiroKickProcessor::createLayout()
     add ("volume", "Volume",      juce::NormalisableRange<float> (-36.0f, 6.0f), -3.0f, "dB");
     p.push_back (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "keyTrack", 1 }, "Key Track", false));
     p.push_back (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "genre", 1 }, "Genre",
-        juce::StringArray { "SCHRANZ", "PSYTRANCE", "HARD BOUNCE", "HARDSTYLE", "HARD TECHNO", "GABBER" }, 0));
+        juce::StringArray { "SCHRANZ", "PSYTRANCE", "HARD BOUNCE", "HARDSTYLE", "HARD TECHNO", "GABBER", "TECHNO" }, 0));
+    const KickParams defaults;
+    for (int i = 0; i < 5; ++i)
+    {
+        const auto n = juce::String (i);
+        p.push_back (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "envT" + n, 1 }, "Shaper Time " + n,
+                                                                  juce::NormalisableRange<float> (0.0f, 1.0f), defaults.envT[i]));
+        p.push_back (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "envG" + n, 1 }, "Shaper Gain " + n,
+                                                                  juce::NormalisableRange<float> (0.0f, 2.0f), 1.0f));
+    }
+    p.push_back (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "loop", 1 }, "Loop", false));
 
     return { p.begin(), p.end() };
 }
@@ -70,6 +83,7 @@ bool CiroKickProcessor::isBusesLayoutSupported (const BusesLayout& layouts) cons
 void CiroKickProcessor::prepareToPlay (double sampleRate, int)
 {
     engine.setSampleRate (sampleRate);
+    sampleRateHz = sampleRate;
 }
 
 static float val (const APVTS& s, const char* id) { return s.getRawParameterValue (id)->load(); }
@@ -93,6 +107,14 @@ KickParams CiroKickProcessor::readParams() const
     k.distType   = (int) val (apvts, "dType");
     k.distMix    = val (apvts, "dMix");
     k.tone       = val (apvts, "tone");
+    k.reso       = val (apvts, "reso");
+    k.punch      = val (apvts, "punch");
+    k.rumbleRoll = val (apvts, "rRoll");
+    for (int i = 0; i < 5; ++i)
+    {
+        k.envT[i] = val (apvts, ("envT" + juce::String (i)).toRawUTF8());
+        k.envG[i] = val (apvts, ("envG" + juce::String (i)).toRawUTF8());
+    }
     k.rumbleAmt   = val (apvts, "rAmt");
     k.rumbleSize  = val (apvts, "rSize");
     k.rumbleDrive = val (apvts, "rDrive");
@@ -136,6 +158,14 @@ void CiroKickProcessor::writeParams (const KickParams& k)
     setParam (apvts, "dType",  (float) k.distType);
     setParam (apvts, "dMix",   k.distMix);
     setParam (apvts, "tone",   k.tone);
+    setParam (apvts, "reso",   k.reso);
+    setParam (apvts, "punch",  k.punch);
+    setParam (apvts, "rRoll",  k.rumbleRoll);
+    for (int i = 0; i < 5; ++i)
+    {
+        setParam (apvts, ("envT" + juce::String (i)).toRawUTF8(), k.envT[i]);
+        setParam (apvts, ("envG" + juce::String (i)).toRawUTF8(), k.envG[i]);
+    }
     setParam (apvts, "rAmt",   k.rumbleAmt);
     setParam (apvts, "rSize",  k.rumbleSize);
     setParam (apvts, "rDrive", k.rumbleDrive);
@@ -181,6 +211,22 @@ void CiroKickProcessor::randomize()
     triggerFromUI();
 }
 
+void CiroKickProcessor::mutate()
+{
+    const auto cur = readParams();
+    history.push_back ({ cur, getPresetName() });
+    if (history.size() > 50) history.erase (history.begin());
+    writeParams (mutateKick (cur, rng));
+    if (! getPresetName().endsWith ("*")) setPresetName (getPresetName() + " *");
+    triggerFromUI();
+}
+
+void CiroKickProcessor::setSteps (int mask)
+{
+    steps = mask;
+    apvts.state.setProperty ("steps", mask, nullptr);
+}
+
 bool CiroKickProcessor::undoRandom()
 {
     if (history.empty()) return false;
@@ -206,10 +252,18 @@ void CiroKickProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     const int n = buffer.getNumSamples();
     auto* left = buffer.getWritePointer (0);
 
+    bool hostPlaying = false;
     if (auto* ph = getPlayHead())
         if (auto pos = ph->getPosition())
+        {
             if (auto b = pos->getBpm())
                 if (*b > 20.0) bpm = *b;
+            if (pos->getIsPlaying())
+                if (auto ppq = pos->getPpqPosition()) { hostPlaying = true; loopPpq = *ppq; }
+        }
+    const bool looping = val (apvts, "loop") > 0.5f;
+    const double ppqPerSample = bpm.load() / 60.0 / sampleRateHz;
+    const int stepMask = steps.load();
 
     engine.setParams (readParams());
 
@@ -221,6 +275,18 @@ void CiroKickProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     {
         for (; pos < end; ++pos)
         {
+            if (looping)
+            {
+                const int step = ((int) std::floor (loopPpq * 4.0)) & 15;
+                if (step != lastStep)
+                {
+                    lastStep = step;
+                    currentStep = step;
+                    if ((stepMask >> step) & 1) startKick (1.0f, -1);
+                }
+                loopPpq += ppqPerSample;
+            }
+            else currentStep = -1;
             float s = engine.next();
             // safety soft limiter above -1 dBFS
             const float a = std::abs (s);
@@ -237,6 +303,7 @@ void CiroKickProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
             startKick (m.getFloatVelocity(), m.getNoteNumber());
     }
     render (n);
+    if (! looping) { lastStep = -1; if (! hostPlaying) loopPpq = 0.0; }
 
     for (int ch = 1; ch < buffer.getNumChannels(); ++ch)
         buffer.copyFrom (ch, 0, buffer, 0, 0, n);
@@ -252,7 +319,10 @@ void CiroKickProcessor::setStateInformation (const void* data, int size)
 {
     if (auto xml = getXmlFromBinary (data, size))
         if (xml->hasTagName (apvts.state.getType()))
+        {
             apvts.replaceState (juce::ValueTree::fromXml (*xml));
+            steps = (int) apvts.state.getProperty ("steps", 0x1111);
+        }
 }
 
 juce::AudioProcessorEditor* CiroKickProcessor::createEditor() { return new CiroKickEditor (*this); }
