@@ -1,12 +1,12 @@
-# CIRO KICK
+# C.I.R.O KICK
 
-Generador de kicks VST3 para FL Studio (Schranz, Psytrance, Hard Bounce, Hardstyle, Hard Techno, Gabber).
+Generador de kicks + bajo + rumble VST3 para FL Studio (Schranz, Psytrance, Hard Bounce, Hardstyle, Hard Techno, Gabber).
 
 ## Conseguir el .vst3 sin instalar nada (GitHub)
 1. Subí esta carpeta a un repo de GitHub.
 2. Pestaña **Actions** → "Build Windows VST3" → al terminar, bajá el artifact `CIRO-KICK-VST3-Windows`.
 3. Copiá la carpeta `CIRO KICK.vst3` a `C:\Program Files\Common Files\VST3\`.
-4. En FL Studio: Options → Manage plugins → Find plugins. Aparece como instrumento "CIRO KICK".
+4. En FL Studio: Options → Manage plugins → Find plugins. Aparece como instrumento "C.I.R.O KICK".
 
 ## Compilar en tu PC (Windows)
 Necesitás Visual Studio (con "Desarrollo para escritorio con C++") y CMake.
@@ -18,6 +18,8 @@ El plugin queda en `build\CiroKick_artefacts\Release\VST3\`.
 
 ## Uso rápido
 - **RANDOM**: genera un kick nuevo según el género elegido. La flecha ↶ vuelve al anterior.
+- **Presets**: 20 por género. Click en el nombre para elegir, flechas para pasar.
+- **RUMBLE**: AMOUNT en 0 lo apaga. **BASS**: LEVEL en 0 lo apaga; click en el patrón (ROLLING/OFFBEAT/GALLOP/REVERSE) para cambiarlo. Sigue el BPM del proyecto.
 - **PLAY**: escuchar. Cualquier nota MIDI también dispara el kick.
 - **KEY**: si está prendido, el tono sigue la nota que tocás.
 - Click en el tipo de drive (SOFT/HARD/FOLD/CRUSH) para cambiarlo, click derecho para volver.

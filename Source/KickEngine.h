@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstring>
 #include <algorithm>
+#include <vector>
 
 // Plain snapshot of every sound parameter (units are the ones shown in the UI).
 struct KickParams
@@ -27,6 +28,18 @@ struct KickParams
     int   distType   = 0;       // 0 Soft, 1 Hard, 2 Fold, 3 Crush
     float distMix    = 1.0f;    // 0..1
     float tone       = 12000.0f;// Hz low-pass after drive
+
+    float rumbleAmt   = 0.0f;   // 0..1 (0 = off)
+    float rumbleSize  = 0.75f;  // 0..1 reverb size
+    float rumbleDrive = 16.0f;  // dB
+    float rumbleTone  = 140.0f; // Hz low-pass
+    float rumbleDuck  = 0.7f;   // 0..1 sidechain under the kick
+
+    int   bassPattern = 0;      // 0 Rolling, 1 Offbeat, 2 Gallop, 3 Reverse
+    float bassLevel   = 0.0f;   // 0..1 (0 = off)
+    float bassSemi    = 0.0f;   // semitones from the kick tune
+    float bassDecay   = 110.0f; // ms
+    float bassCutoff  = 800.0f; // Hz
 
     float volume     = -3.0f;   // dB
     bool  keyTrack   = false;
@@ -61,6 +74,7 @@ public:
     }
 
     bool isActive() const { return active; }
+    float getBaseHz() const { return (float) endHz; }
 
     float next()
     {
@@ -139,14 +153,18 @@ public:
         {
             seed = seed * 1664525u + 1013904223u;
             const float noise = (float) ((seed >> 9) * (1.0 / 4194304.0) - 1.0);
-            // state-variable band-pass
-            const float f = (float) (2.0 * std::sin (3.14159265358979 * std::min (params.clickTone, (float) sampleRate * 0.2f) / sampleRate));
-            const float q = 0.6f;
-            bp2 += f * bp1;
-            const float hp = noise - bp2 - q * bp1;
-            bp1 += f * hp;
+            // TPT state-variable band-pass
+            const double g = std::tan (3.14159265358979 * std::min ((double) params.clickTone, sampleRate * 0.45) / sampleRate);
+            const double k = 1.4;
+            const double a1 = 1.0 / (1.0 + g * (g + k)), a2 = g * a1, a3 = g * a2;
+            const double v3 = noise - bp2;
+            const double v1 = a1 * bp1 + a2 * v3;
+            const double v2 = bp2 + a2 * bp1 + a3 * v3;
+            bp1 = (float) (2 * v1 - bp1);
+            bp2 = (float) (2 * v2 - bp2);
+            const double band = v1;
             const double cEnv = std::exp (-ms / std::max (0.3f, params.clickDecay));
-            out += bp1 * 1.6 * cEnv * params.clickLevel;
+            out += band * 1.4 * cEnv * params.clickLevel;
         }
 
         out *= std::pow (10.0, params.volume / 20.0) * vel;
@@ -176,4 +194,204 @@ private:
     float crushHold = 0.0f;
     int crushCount = 0;
     uint32_t seed = 22222u;
+};
+
+// Zero-delay-feedback state-variable filter.
+struct SVF
+{
+    double ic1 = 0, ic2 = 0;
+    void reset() { ic1 = ic2 = 0; }
+    double lowpass (double x, double fc, double sr, double q = 0.8)
+    {
+        const double g = std::tan (3.14159265358979 * std::clamp (fc, 10.0, sr * 0.45) / sr);
+        const double k = 1.0 / q;
+        const double a1 = 1.0 / (1.0 + g * (g + k)), a2 = g * a1, a3 = g * a2;
+        const double v3 = x - ic2;
+        const double v1 = a1 * ic1 + a2 * v3;
+        const double v2 = ic2 + a2 * ic1 + a3 * v3;
+        ic1 = 2 * v1 - ic1;
+        ic2 = 2 * v2 - ic2;
+        return v2;
+    }
+};
+
+// Bass notes that play between kicks.
+class BassVoice
+{
+public:
+    void setSampleRate (double sr) { sampleRate = sr; }
+    void noteOn (double hz, bool reverseMode, double lenSamples, const KickParams& p)
+    {
+        freq = hz; reverse = reverseMode; len = std::max (1.0, lenSamples);
+        decay = p.bassDecay; cutoff = p.bassCutoff; level = p.bassLevel;
+        t = 0; active = true;
+    }
+    void stop() { active = false; filter.reset(); }
+
+    float next()
+    {
+        if (! active) return 0.0f;
+        const double ms = t / sampleRate * 1000.0;
+        double amp, fenv;
+        if (! reverse)
+        {
+            const double x = ms / std::max (5.0, decay);
+            if (x >= 1.0) { active = false; return 0.0f; }
+            amp = std::min (1.0, ms / 1.0) * (1.0 - x) * (1.0 - x);
+            fenv = std::exp (-ms / std::max (2.0, decay * 0.3));
+        }
+        else
+        {
+            const double u = t / len;
+            if (u >= 1.0) { active = false; return 0.0f; }
+            amp = std::pow (u, 2.2) * std::min (1.0, (len - t) / (0.003 * sampleRate));
+            fenv = u * 0.6;
+        }
+        phase += freq / sampleRate;
+        phase -= std::floor (phase);
+        double osc;
+        if (reverse) osc = std::tanh (3.0 * std::sin (phase * 6.283185307));
+        else
+        {
+            // band-limited saw (polyBLEP)
+            const double dt = freq / sampleRate;
+            osc = 2.0 * phase - 1.0;
+            if (phase < dt) { const double x = phase / dt; osc -= x + x - x * x - 1.0; }
+            else if (phase > 1.0 - dt) { const double x = (phase - 1.0) / dt; osc -= x * x + x + x + 1.0; }
+        }
+        const double y = filter.lowpass (osc, cutoff * (1.0 + 5.0 * fenv), sampleRate, 0.9);
+        t += 1.0;
+        return (float) (std::tanh (y * 1.6) * amp * level * 1.5);
+    }
+
+private:
+    double sampleRate = 44100.0, freq = 50.0, phase = 0, t = 0, len = 1, decay = 100, cutoff = 800;
+    float level = 0.5f;
+    bool reverse = false, active = false;
+    SVF filter;
+};
+
+// Hard techno rumble: kick -> reverb -> distortion -> low-pass -> sidechain.
+class Rumble
+{
+public:
+    void setSampleRate (double sr)
+    {
+        sampleRate = sr;
+        const int combLen[4] = { 1116, 1188, 1277, 1356 };
+        const int apLen[2] = { 556, 441 };
+        for (int i = 0; i < 4; ++i) { combs[i].assign ((size_t) (combLen[i] * sr / 44100.0), 0.0f); combIdx[i] = 0; store[i] = 0; }
+        for (int i = 0; i < 2; ++i) { aps[i].assign ((size_t) (apLen[i] * sr / 44100.0), 0.0f); apIdx[i] = 0; }
+        lp1.reset(); lp2.reset(); hp = 0; env = 0;
+    }
+
+    float process (float in, const KickParams& p)
+    {
+        if (p.rumbleAmt <= 0.0001f) { env = 0; return 0.0f; }
+        const float fb = 0.70f + 0.28f * p.rumbleSize, damp = 0.35f;
+        const float x = in * 0.2f;
+        float sum = 0;
+        for (int i = 0; i < 4; ++i)
+        {
+            auto& b = combs[i];
+            const float o = b[(size_t) combIdx[i]];
+            store[i] = o * (1.0f - damp) + store[i] * damp;
+            b[(size_t) combIdx[i]] = x + store[i] * fb;
+            if (++combIdx[i] >= (int) b.size()) combIdx[i] = 0;
+            sum += o;
+        }
+        for (int i = 0; i < 2; ++i)
+        {
+            auto& b = aps[i];
+            const float o = b[(size_t) apIdx[i]];
+            b[(size_t) apIdx[i]] = sum + o * 0.5f;
+            if (++apIdx[i] >= (int) b.size()) apIdx[i] = 0;
+            sum = o - sum;
+        }
+        const double g = std::pow (10.0, p.rumbleDrive / 20.0);
+        double y = std::tanh (sum * g * 2.0);
+        y = lp1.lowpass (y, p.rumbleTone, sampleRate, 0.7);
+        y = lp2.lowpass (y, p.rumbleTone, sampleRate, 0.7);
+        hp += (y - hp) * (1.0 - std::exp (-6.283185307 * 25.0 / sampleRate));
+        y -= hp;
+
+        // sidechain follower from the kick
+        const float a = std::abs (in);
+        env = a > env ? a : env * (float) std::exp (-1.0 / (0.08 * sampleRate));
+        const double duck = 1.0 - p.rumbleDuck * std::min (1.0f, env * 1.5f);
+        return (float) (y * duck * p.rumbleAmt * 1.4);
+    }
+
+private:
+    double sampleRate = 44100.0;
+    std::vector<float> combs[4], aps[2];
+    int combIdx[4] {}, apIdx[2] {};
+    float store[4] {};
+    SVF lp1, lp2;
+    double hp = 0;
+    float env = 0;
+};
+
+// Kick + bass pattern + rumble, used by the plugin and the display.
+class GrooveEngine
+{
+public:
+    void setSampleRate (double sr)
+    {
+        sampleRate = sr;
+        for (auto& v : voices) v.setSampleRate (sr);
+        bass.setSampleRate (sr);
+        rumble.setSampleRate (sr);
+    }
+    void setParams (const KickParams& p) { params = p; }
+
+    void trigger (const KickParams& p, float vel, float baseHz, double bpm)
+    {
+        params = p;
+        voices[cur].release();
+        cur ^= 1;
+        voices[cur].trigger (p, vel, baseHz);
+        bass.stop();
+        beat = 60.0 / std::clamp (bpm, 60.0, 300.0) * sampleRate;
+        sinceKick = 0;
+        eventIdx = 0;
+        bassHz = voices[cur].getBaseHz() * std::pow (2.0, p.bassSemi / 12.0);
+        bassVel = vel;
+    }
+
+    void next (float& kick, float& bassOut, float& rumbleOut)
+    {
+        kick = voices[0].next() + voices[1].next();
+        if (params.bassLevel > 0.0001f)
+        {
+            static const double ev[4][3] = { { 0.25, 0.5, 0.75 }, { 0.5, -1, -1 }, { 0.5, 0.75, -1 }, { 0.12, -1, -1 } };
+            const int pat = std::clamp (params.bassPattern, 0, 3);
+            if (eventIdx < 3 && ev[pat][eventIdx] >= 0 && sinceKick >= ev[pat][eventIdx] * beat)
+            {
+                KickParams q = params;
+                q.bassLevel *= bassVel;
+                bass.noteOn (bassHz, pat == 3, (0.97 - 0.12) * beat, q);
+                ++eventIdx;
+            }
+        }
+        bassOut = bass.next() * (float) std::pow (10.0, params.volume / 20.0);
+        rumbleOut = rumble.process (kick, params);
+        sinceKick += 1.0;
+    }
+
+    float next()
+    {
+        float k, b, r;
+        next (k, b, r);
+        return k + b + r;
+    }
+
+private:
+    double sampleRate = 44100.0, beat = 20000, sinceKick = 1e9, bassHz = 50;
+    float bassVel = 1.0f;
+    int cur = 0, eventIdx = 3;
+    KickVoice voices[2];
+    BassVoice bass;
+    Rumble rumble;
+    KickParams params;
 };

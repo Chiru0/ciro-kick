@@ -25,15 +25,15 @@ struct Spring
     void kick (float amount) { velocity -= amount; }
 };
 
-class KnobLookAndFeel : public juce::LookAndFeel_V4
+class CiroLookAndFeel : public juce::LookAndFeel_V4
 {
 public:
-    juce::Colour accent { 0xffff3b5c };
-    void drawRotarySlider (juce::Graphics&, int x, int y, int w, int h, float pos,
-                           float start, float end, juce::Slider&) override;
+    CiroLookAndFeel();
+    // knobs are painted by FunKnob itself
+    void drawRotarySlider (juce::Graphics&, int, int, int, int, float, float, float, juce::Slider&) override {}
 };
 
-// Rotary knob + label. Shows its value while hovered or dragged.
+// Rotary knob that eases towards its value, flashes when changed by RANDOM/presets.
 class FunKnob : public juce::Component
 {
 public:
@@ -41,7 +41,7 @@ public:
              std::function<juce::String (float)> fmt);
     void resized() override;
     void paint (juce::Graphics&) override;
-    bool animate();
+    bool animate (juce::Colour accent);
     void mouseEnter (const juce::MouseEvent&) override { repaint(); }
     void mouseExit (const juce::MouseEvent&) override  { repaint(); }
     void mouseUp (const juce::MouseEvent&) override    { repaint(); }
@@ -52,8 +52,8 @@ private:
     std::function<juce::String (float)> format;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
     Spring spring;
-    bool wasActive = false;
-    float lastScale = 1.0f;
+    float shown = -1.0f, flash = 0.0f;
+    juce::Colour accent { 0xffff3b5c };
 };
 
 // Squishy button with an optional custom painter.
@@ -65,6 +65,7 @@ public:
     bool filled = false;
     bool selected = false;
     float glow = 0.0f;
+    float fontSize = 15.0f;
     std::function<void()> onClick;
     std::function<void()> onRightClick;
     std::function<void (juce::Graphics&, juce::Rectangle<float>)> drawIcon;
@@ -74,12 +75,37 @@ public:
     void mouseUp (const juce::MouseEvent&) override;
     void mouseEnter (const juce::MouseEvent&) override { hover = true; spring.target = 1.04f; }
     void mouseExit (const juce::MouseEvent&) override  { hover = false; spring.target = 1.0f; }
-    bool animate();
+    virtual bool animate();
     void pop (float amount = 0.18f) { spring.kick (amount); }
 
-private:
+protected:
     Spring spring;
     bool hover = false;
+};
+
+// Big pad with expanding rings on every hit.
+class PlayPad : public FunButton
+{
+public:
+    void paint (juce::Graphics&) override;
+    bool animate() override;
+    void hit();
+private:
+    std::vector<float> rings;
+};
+
+// Confetti-like particles drawn over everything.
+class Particles : public juce::Component
+{
+public:
+    Particles() { setInterceptsMouseClicks (false, false); }
+    void burst (juce::Point<float> at, juce::Colour c, int count, float speed);
+    bool step();
+    void paint (juce::Graphics&) override;
+private:
+    struct P { juce::Point<float> pos, vel; float life, size, spin, angle; juce::Colour colour; int shape; };
+    std::vector<P> ps;
+    juce::Random rnd;
 };
 
 class WaveDisplay : public juce::Component
@@ -87,18 +113,20 @@ class WaveDisplay : public juce::Component
 public:
     explicit WaveDisplay (CiroKickProcessor& p) : proc (p) {}
     void paint (juce::Graphics&) override;
-    bool update (juce::Colour accent, double nowMs);
-    void hit (double nowMs) { lastHitMs = nowMs; }
+    void update (juce::Colour accent, double nowMs);
+    void hit (double nowMs) { lastHitMs = nowMs; shake = 1.0f; }
 
 private:
-    void render (const KickParams&);
+    void render (const KickParams&, double bpm);
     CiroKickProcessor& proc;
     KickParams cached;
+    double cachedBpm = 0;
     bool hasCache = false;
-    std::vector<float> peaks;
+    std::vector<float> kickT, bassT, rumbleT;   // targets
+    std::vector<float> kickS, bassS, rumbleS;   // shown (morphing)
     juce::Colour accent;
     double lastHitMs = -1.0e9, nowMs = 0.0;
-    float lengthMs = 450.0f;
+    float spanMs = 450.0f, shake = 0.0f;
 };
 
 class CiroKickEditor : public juce::AudioProcessorEditor, private juce::Timer
@@ -112,17 +140,22 @@ public:
 private:
     void timerCallback() override;
     void layoutRow (std::vector<std::vector<juce::Component*>> groups, int y);
+    void showPresetMenu();
+    void stepPreset (int delta);
+    std::unique_ptr<juce::ParameterAttachment> attachCycle (FunButton&, const char* id, int count);
 
     CiroKickProcessor& proc;
-    KnobLookAndFeel lnf;
+    CiroLookAndFeel lnf;
     WaveDisplay display;
     std::vector<std::unique_ptr<FunKnob>> knobs;
     std::map<juce::String, FunKnob*> knobById;
-    FunButton randomBtn, undoBtn, playBtn, distTypeBtn, keyTrackBtn;
+    FunButton randomBtn, undoBtn, distTypeBtn, keyTrackBtn, bassPatBtn, presetBtn, prevBtn, nextBtn;
+    PlayPad playBtn;
+    Particles particles;
     std::vector<std::unique_ptr<FunButton>> genreBtns;
-    std::unique_ptr<juce::ParameterAttachment> distTypeAtt, keyTrackAtt, genreAtt;
+    std::unique_ptr<juce::ParameterAttachment> distTypeAtt, keyTrackAtt, genreAtt, bassPatAtt;
     juce::Colour accent { 0xffff3b5c };
     int lastHit = 0, dieFace = 5;
-    float dieSpin = 0.0f;
+    float dieSpin = 0.0f, bgFlash = 0.0f;
     std::vector<std::pair<juce::String, juce::Rectangle<int>>> sectionLabels;
 };
