@@ -40,8 +40,10 @@ public:
     int getGenre() const;
     void loadPreset (int genre, int index);
     void mutate();
-    void setSteps (int mask);
-    int getSteps() const { return steps.load(); }
+    void setSteps (juce::int64 mask);
+    juce::int64 getSteps() const { return steps.load(); }
+    void setLoopLength (int len);
+    int getLoopLength() const { return loopLen.load(); }
     std::atomic<int> currentStep { -1 };
     juce::String getPresetName() const;
     int presetIndex = -1;
@@ -57,7 +59,8 @@ private:
     void setPresetName (const juce::String&);
     GrooveEngine engine;
     int randomCount = 0;
-    std::atomic<int> steps { 0x1111 };
+    std::atomic<juce::int64> steps { 0x11111111 };
+    std::atomic<int> loopLen { 16 };
     double loopPpq = 0.0, sampleRateHz = 44100.0;
     int lastStep = -1;
     std::atomic<bool> uiTrigger { false };

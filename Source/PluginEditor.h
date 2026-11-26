@@ -156,7 +156,7 @@ private:
     int stepAt (float x) const;
     CiroKickProcessor& proc;
     int paintValue = 1, lastPainted = -1, lastStep = -2;
-    float flashes[16] {};
+    float flashes[32] {};
 };
 
 class WaveDisplay : public juce::Component
@@ -170,6 +170,8 @@ public:
     void mouseMove (const juce::MouseEvent&) override;
     void mouseExit (const juce::MouseEvent&) override { hoverNode = -1; repaint(); }
     void mouseDoubleClick (const juce::MouseEvent&) override;
+    void setMode (int m) { mode = m; hasCache = false; repaint(); }
+    int mode = 0;
     void update (juce::Colour accent, double nowMs);
     void hit (double nowMs) { lastHitMs = nowMs; shake = 1.0f; }
 
@@ -177,6 +179,11 @@ private:
     void render (const KickParams&, double bpm);
     juce::Rectangle<float> waveArea() const;
     juce::Point<float> nodePos (int i) const;
+    const float* nodeT (const KickParams&) const;
+    const float* nodeG (const KickParams&) const;
+    juce::String nodeId (bool gain) const;
+    float nodeMs (const KickParams&, float t) const;
+    float msToNode (const KickParams&, float ms) const;
     int nodeAt (juce::Point<float>) const;
     void setNode (int i, float t, float g);
     CiroKickProcessor& proc;
@@ -214,7 +221,12 @@ private:
     FaceLogo face;
     XYPad xyPad;
     StepStrip stepStrip;
-    FunButton mutateBtn, loopBtn;
+    FunButton loopLessBtn, loopMoreBtn;
+    FunButton mutateBtn, loopBtn, rRateBtn, bOscBtn;
+    FunButton tabBtns[3];
+    int tab = 0, frame = 0;
+    void setTab (int);
+    std::unique_ptr<juce::ParameterAttachment> rRateAtt, bOscAtt;
     std::unique_ptr<juce::ParameterAttachment> loopAtt;
     FunButton randomBtn, undoBtn, distTypeBtn, keyTrackBtn, bassPatBtn, presetBtn, prevBtn, nextBtn;
     PlayPad playBtn;

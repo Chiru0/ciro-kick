@@ -472,15 +472,16 @@ void XYPad::paint (juce::Graphics& g)
 //==============================================================================
 int StepStrip::stepAt (float x) const
 {
-    return std::clamp ((int) (x / ((float) getWidth() / 16.0f)), 0, 15);
+    const int n = proc.getLoopLength();
+    return std::clamp ((int) (x / ((float) getWidth() / (float) n)), 0, n - 1);
 }
 
 void StepStrip::mouseDown (const juce::MouseEvent& e)
 {
     const int s = stepAt (e.position.x);
-    const int mask = proc.getSteps();
+    const auto mask = proc.getSteps();
     paintValue = ((mask >> s) & 1) ? 0 : 1;
-    proc.setSteps (paintValue ? (mask | (1 << s)) : (mask & ~(1 << s)));
+    proc.setSteps (paintValue ? (mask | ((juce::int64) 1 << s)) : (mask & ~((juce::int64) 1 << s)));
     lastPainted = s;
     flashes[s] = 1.0f;
     repaint();
@@ -491,8 +492,8 @@ void StepStrip::mouseDrag (const juce::MouseEvent& e)
     const int s = stepAt (e.position.x);
     if (s == lastPainted) return;
     lastPainted = s;
-    const int mask = proc.getSteps();
-    proc.setSteps (paintValue ? (mask | (1 << s)) : (mask & ~(1 << s)));
+    const auto mask = proc.getSteps();
+    proc.setSteps (paintValue ? (mask | ((juce::int64) 1 << s)) : (mask & ~((juce::int64) 1 << s)));
     flashes[s] = 1.0f;
     repaint();
 }
@@ -514,10 +515,11 @@ bool StepStrip::animate()
 
 void StepStrip::paint (juce::Graphics& g)
 {
-    const int mask = proc.getSteps();
+    const auto mask = proc.getSteps();
     const int cur = proc.currentStep.load();
-    const float w = (float) getWidth() / 16.0f;
-    for (int i = 0; i < 16; ++i)
+    const int n = proc.getLoopLength();
+    const float w = (float) getWidth() / (float) n;
+    for (int i = 0; i < n; ++i)
     {
         auto r = juce::Rectangle<float> (i * w, 0, w, (float) getHeight()).reduced (3.0f, 2.0f);
         const bool on = (mask >> i) & 1;
@@ -543,11 +545,37 @@ void StepStrip::paint (juce::Graphics& g)
 //==============================================================================
 juce::Rectangle<float> WaveDisplay::waveArea() const { return getLocalBounds().toFloat().reduced (12.0f, 24.0f); }
 
+const float* WaveDisplay::nodeT (const KickParams& k) const { return mode == 0 ? k.envT : mode == 1 ? k.rEnvT : k.bEnvT; }
+const float* WaveDisplay::nodeG (const KickParams& k) const { return mode == 0 ? k.envG : mode == 1 ? k.rEnvG : k.bEnvG; }
+juce::String WaveDisplay::nodeId (bool gain) const
+{
+    return juce::String (mode == 0 ? "env" : mode == 1 ? "rEnv" : "bEnv") + (gain ? "G" : "T");
+}
+
+// node time (0..1) <-> milliseconds from the kick, per mode
+float WaveDisplay::nodeMs (const KickParams& k, float t) const
+{
+    const float beatMs = (float) (60000.0 / std::max (20.0, cachedBpm));
+    if (mode == 0) return t * k.length;
+    if (mode == 1) return t * beatMs;
+    static const float firstEv[4] = { 0.25f, 0.5f, 0.5f, 0.12f };
+    return firstEv[std::clamp (k.bassPattern, 0, 3)] * beatMs + t * k.bassDecay;
+}
+
+float WaveDisplay::msToNode (const KickParams& k, float ms) const
+{
+    const float beatMs = (float) (60000.0 / std::max (20.0, cachedBpm));
+    if (mode == 0) return ms / std::max (1.0f, k.length);
+    if (mode == 1) return ms / beatMs;
+    static const float firstEv[4] = { 0.25f, 0.5f, 0.5f, 0.12f };
+    return (ms - firstEv[std::clamp (k.bassPattern, 0, 3)] * beatMs) / std::max (1.0f, k.bassDecay);
+}
+
 juce::Point<float> WaveDisplay::nodePos (int i) const
 {
     const auto area = waveArea();
-    const float frac = cached.envT[i] * cached.length / std::max (1.0f, spanMs);
-    return { area.getX() + frac * area.getWidth(), area.getCentreY() - cached.envG[i] * 0.5f * area.getHeight() * 0.5f };
+    const float frac = nodeMs (cached, nodeT (cached)[i]) / std::max (1.0f, spanMs);
+    return { area.getX() + frac * area.getWidth(), area.getCentreY() - nodeG (cached)[i] * 0.5f * area.getHeight() * 0.5f };
 }
 
 int WaveDisplay::nodeAt (juce::Point<float> p) const
@@ -565,16 +593,16 @@ int WaveDisplay::nodeAt (juce::Point<float> p) const
 void WaveDisplay::setNode (int i, float t, float gain)
 {
     auto set = [&] (const juce::String& id, float v) { if (auto* p = proc.apvts.getParameter (id)) p->setValueNotifyingHost (p->convertTo0to1 (v)); };
-    set ("envT" + juce::String (i), t);
-    set ("envG" + juce::String (i), gain);
+    set (nodeId (false) + juce::String (i), t);
+    set (nodeId (true) + juce::String (i), gain);
 }
 
 void WaveDisplay::mouseDown (const juce::MouseEvent& e)
 {
     dragNode = nodeAt (e.position);
     if (dragNode < 0) { proc.triggerFromUI(); return; }
-    for (auto* id : { "envT", "envG" })
-        if (auto* p = proc.apvts.getParameter (id + juce::String (dragNode))) p->beginChangeGesture();
+    for (bool gain : { false, true })
+        if (auto* p = proc.apvts.getParameter (nodeId (gain) + juce::String (dragNode))) p->beginChangeGesture();
 }
 
 void WaveDisplay::mouseDrag (const juce::MouseEvent& e)
@@ -582,12 +610,13 @@ void WaveDisplay::mouseDrag (const juce::MouseEvent& e)
     if (dragNode < 0) return;
     const auto area = waveArea();
     const auto k = proc.readParams();
-    float t = (e.position.x - area.getX()) / area.getWidth() * spanMs / std::max (1.0f, k.length);
+    float t = msToNode (k, (e.position.x - area.getX()) / area.getWidth() * spanMs);
+    const float* T = nodeT (k);
     if (dragNode == 0) t = 0.0f;
     else
     {
-        const float lo = k.envT[dragNode - 1] + 0.005f;
-        const float hi = dragNode < 4 ? k.envT[dragNode + 1] - 0.005f : 1.0f;
+        const float lo = T[dragNode - 1] + 0.005f;
+        const float hi = dragNode < 4 ? T[dragNode + 1] - 0.005f : 1.0f;
         t = std::clamp (t, lo, std::max (lo, hi));
     }
     const float gain = std::clamp ((area.getCentreY() - e.position.y) / (area.getHeight() * 0.25f), 0.0f, 2.0f);
@@ -598,8 +627,8 @@ void WaveDisplay::mouseUp (const juce::MouseEvent&)
 {
     if (dragNode >= 0)
     {
-        for (auto* id : { "envT", "envG" })
-            if (auto* p = proc.apvts.getParameter (id + juce::String (dragNode))) p->endChangeGesture();
+        for (bool gain : { false, true })
+            if (auto* p = proc.apvts.getParameter (nodeId (gain) + juce::String (dragNode))) p->endChangeGesture();
         proc.triggerFromUI();
     }
     dragNode = -1;
@@ -615,7 +644,7 @@ void WaveDisplay::mouseMove (const juce::MouseEvent& e)
 void WaveDisplay::mouseDoubleClick (const juce::MouseEvent& e)
 {
     const int n = nodeAt (e.position);
-    if (n >= 0) setNode (n, cached.envT[n], 1.0f);
+    if (n >= 0) setNode (n, nodeT (cached)[n], mode == 2 ? KickParams().bEnvG[n] : 1.0f);
 }
 
 //==============================================================================
@@ -636,7 +665,7 @@ void WaveDisplay::render (const KickParams& p, double bpm)
     e.trigger (q, 1.0f, -1.0f, bpm);
     const double beatMs = 60000.0 / bpm;
     const bool extras = p.bassLevel > 0.0001f || p.rumbleAmt > 0.0001f;
-    spanMs = (float) std::max ((double) p.length + 20.0, extras ? beatMs : 0.0);
+    spanMs = (float) std::max ((double) p.length + 20.0, (extras || mode != 0) ? beatMs : 0.0);
     const int total = (int) (sr * spanMs / 1000.0);
     const int w = std::max (1, getWidth() - 24);
     kickT.assign ((size_t) w, 0.0f); bassT.assign ((size_t) w, 0.0f); rumbleT.assign ((size_t) w, 0.0f);
@@ -724,13 +753,14 @@ void WaveDisplay::paint (juce::Graphics& g)
     const auto rumbleCol = accent.withRotatedHue (-0.08f).darker (0.4f);
     const auto bassCol = accent.withRotatedHue (0.45f).brighter (0.2f);
     const auto rumblePath = makePath (rumbleS), bassPath = makePath (bassS), kickPath = makePath (kickS);
-    g.setColour (rumbleCol.withAlpha (0.55f)); g.fillPath (rumblePath);
-    g.setColour (bassCol.withAlpha (0.7f + 0.3f * flash)); g.fillPath (bassPath);
+    const float kickA = mode == 0 ? 1.0f : 0.25f;
+    g.setColour (rumbleCol.withAlpha (mode == 1 ? 0.95f : 0.45f)); g.fillPath (rumblePath);
+    g.setColour (bassCol.withAlpha ((mode == 2 ? 0.95f : 0.6f) + 0.05f * flash)); g.fillPath (bassPath);
 
     juce::ColourGradient grad (accent.brighter (0.3f + flash * 0.4f), area.getX(), mid - half,
                                accent.darker (0.3f), area.getX(), mid + half, false);
     g.setGradientFill (grad);
-    g.setOpacity (0.75f + 0.25f * flash);
+    g.setOpacity ((0.75f + 0.25f * flash) * kickA);
     g.fillPath (kickPath);
     g.setOpacity (1.0f);
 
@@ -753,8 +783,9 @@ void WaveDisplay::paint (juce::Graphics& g)
         juce::Path line;
         line.startNewSubPath (nodePos (0));
         for (int i = 1; i < 5; ++i) line.lineTo (nodePos (i));
-        const float endX = area.getX() + std::min (1.0f, cached.length / std::max (1.0f, spanMs)) * area.getWidth();
-        line.lineTo (endX, nodePos (4).y);
+        const float endMs = mode == 0 ? cached.length : mode == 1 ? spanMs : nodeMs (cached, 1.0f);
+        const float endX = area.getX() + std::min (1.0f, endMs / std::max (1.0f, spanMs)) * area.getWidth();
+        line.lineTo (std::max (endX, nodePos (4).x), nodePos (4).y);
         g.setColour (juce::Colours::white.withAlpha (0.18f));
         g.strokePath (line, juce::PathStrokeType (5.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
         g.setColour (juce::Colours::white.withAlpha (0.75f));
@@ -775,10 +806,10 @@ void WaveDisplay::paint (juce::Graphics& g)
             g.drawEllipse (pt.x - r, pt.y - r, r * 2, r * 2, 2.0f);
             if (i == dragNode)
             {
-                const float db = 20.0f * std::log10 (std::max (0.001f, cached.envG[i]));
+                const float db = 20.0f * std::log10 (std::max (0.001f, nodeG (cached)[i]));
                 g.setFont (uiFont (11.0f, true));
                 g.setColour (ui::text);
-                g.drawText ((db > 0 ? "+" : "") + juce::String (db, 1) + " dB  " + juce::String (juce::roundToInt (cached.envT[i] * cached.length)) + " ms",
+                g.drawText ((db > 0 ? "+" : "") + juce::String (db, 1) + " dB  " + juce::String (juce::roundToInt (nodeMs (cached, nodeT (cached)[i]))) + " ms",
                             juce::Rectangle<float> (pt.x - 60, pt.y < area.getY() + 24 ? pt.y + 12 : pt.y - 28, 120, 14).toNearestInt(), juce::Justification::centred);
             }
         }
@@ -800,6 +831,9 @@ void WaveDisplay::paint (juce::Graphics& g)
         g.drawText (t, lx + 11, (int) info.getBottom() - 13, 70, 14, juce::Justification::centredLeft);
         lx += 80;
     };
+    g.setColour (ui::dim);
+    g.drawText (mode == 0 ? "drag points: kick transient" : mode == 1 ? "drag points: rumble shape over the beat" : "drag points: bass note envelope",
+                info.toNearestInt(), juce::Justification::bottomRight);
     legend ("KICK", accent);
     if (cached.bassLevel > 0.0001f) legend ("BASS", bassCol);
     if (cached.rumbleAmt > 0.0001f) legend ("RUMBLE", rumbleCol);
@@ -879,6 +913,10 @@ CiroKickEditor::CiroKickEditor (CiroKickProcessor& p)
         { "cLevel", "LEVEL", fmtPct }, { "cDecay", "SNAP", fmtMs }, { "cTone", "TONE", fmtHz },
         { "drive", "DRIVE", fmtDb }, { "dMix", "MIX", fmtPct }, { "tone", "FILTER", fmtHz },
         { "reso", "RESO", fmtX }, { "punch", "PUNCH", fmtMs }, { "rRoll", "ROLL", fmtPct },
+        { "sub", "SUB", fmtPct }, { "metal", "METAL", fmtPct }, { "mTone", "M.TONE", fmtHz },
+        { "rPre", "PRE-DLY", fmtMs }, { "rDamp", "DAMP", fmtPct }, { "rLow", "LOW CUT", fmtHz }, { "rGrit", "GRIT", fmtPct },
+        { "bAtk", "ATTACK", fmtMs }, { "bEnv", "ENV", fmtX }, { "bReso", "RESO", fmtX }, { "bDrive", "DRIVE", fmtDb },
+        { "bGlide", "GLIDE", fmtSemi },
         { "volume", "VOLUME", fmtDb },
         { "rAmt", "AMOUNT", fmtPct }, { "rSize", "SIZE", fmtPct }, { "rDrive", "DIRT", fmtDb },
         { "rTone", "TONE", fmtHz }, { "rDuck", "DUCK", fmtPct },
@@ -1004,7 +1042,7 @@ CiroKickEditor::CiroKickEditor (CiroKickProcessor& p)
     addAndMakeVisible (mutateBtn);
 
     // LOOP + steps
-    loopBtn.label = "LOOP";
+
     loopAtt = std::make_unique<juce::ParameterAttachment> (*p.apvts.getParameter ("loop"), [this] (float v)
     {
         loopBtn.selected = v > 0.5f;
@@ -1013,13 +1051,54 @@ CiroKickEditor::CiroKickEditor (CiroKickProcessor& p)
     loopAtt->sendInitialUpdate();
     loopBtn.onClick = [this] { loopAtt->setValueAsCompleteGesture (loopBtn.selected ? 0.0f : 1.0f); loopBtn.glow = 1.0f; };
     addAndMakeVisible (loopBtn);
+    loopLessBtn.label = "-";
+    loopMoreBtn.label = "+";
+    loopLessBtn.fontSize = loopMoreBtn.fontSize = 20.0f;
+    auto changeLen = [this] (int d)
+    {
+        const int n = proc.getLoopLength();
+        const int next = d > 0 ? (n < 4 ? n + 1 : std::min (32, n + 4)) : (n <= 4 ? std::max (1, n - 1) : n - 4);
+        proc.setLoopLength (next);
+        loopBtn.label = "LOOP " + juce::String (next);
+        loopBtn.glow = 0.6f;
+        stepStrip.repaint();
+    };
+    loopLessBtn.onClick = [changeLen] { changeLen (-1); };
+    loopMoreBtn.onClick = [changeLen] { changeLen (1); };
+    loopBtn.label = "LOOP " + juce::String (proc.getLoopLength());
+    addAndMakeVisible (loopLessBtn);
+    addAndMakeVisible (loopMoreBtn);
     addAndMakeVisible (stepStrip);
     addAndMakeVisible (xyPad);
+
+    rRateAtt = attachCycle (rRateBtn, "rRate", 3);
+    bOscAtt = attachCycle (bOscBtn, "bOsc", 4);
+    bOscBtn.fontSize = 12.0f;
+    addAndMakeVisible (rRateBtn);
+    addAndMakeVisible (bOscBtn);
+
+    const char* tabNames[3] = { "KICK", "RUMBLE", "BASS" };
+    for (int i = 0; i < 3; ++i)
+    {
+        tabBtns[i].label = tabNames[i];
+        tabBtns[i].drawIcon = [this, i] (juce::Graphics& g, juce::Rectangle<float> r)
+        {
+            const auto k = proc.readParams();
+            const bool on = i == 0 || (i == 1 ? k.rumbleAmt > 0.0001f : k.bassLevel > 0.0001f);
+            const auto c = r.getCentre();
+            const float rad = std::min (r.getWidth(), r.getHeight()) * 0.32f;
+            if (on) g.fillEllipse (c.x - rad, c.y - rad, rad * 2, rad * 2);
+            else g.drawEllipse (c.x - rad, c.y - rad, rad * 2, rad * 2, 1.5f);
+        };
+        tabBtns[i].onClick = [this, i] { setTab (i); };
+        addAndMakeVisible (tabBtns[i]);
+    }
 
     addAndMakeVisible (display);
     addAndMakeVisible (particles);
     lastHit = proc.hitCounter.load();
-    setSize (1060, 760);
+    setSize (1060, 664);
+    setTab (0);
     startTimerHz (60);
 }
 
@@ -1097,7 +1176,7 @@ void CiroKickEditor::paint (juce::Graphics& g)
 
 void CiroKickEditor::layoutRow (std::vector<std::vector<juce::Component*>> groups, int y)
 {
-    const int cell = 86, gap = 30;
+    const int cell = 80, gap = 24;
     int total = -gap;
     for (auto& grp : groups) total += (int) grp.size() * cell + gap;
     int x = (getWidth() - total) / 2;
@@ -1127,43 +1206,79 @@ void CiroKickEditor::resized()
     presetBtn.setBounds (px + 42, 24, pw - 84, 38);
     nextBtn.setBounds (px + pw - 40, 24, 40, 38);
 
-    const int pillW = 138, pillGap = 8;
+    const int pillW = 120, pillGap = 7;
     int gx = (getWidth() - (pillW * numGenres + pillGap * (numGenres - 1))) / 2;
     for (auto& b : genreBtns) { b->setBounds (gx, 84, pillW, 34); gx += pillW + pillGap; }
 
-    const int top = 130, h = 190;
+    for (int t = 0; t < 3; ++t) tabBtns[t].setBounds (21 + t * 132, 126, 128, 38);
+
+    const int top = 172, h = 180;
     const int playW = 130, xyW = 170;
     display.setBounds (24, top, getWidth() - 48 - playW - xyW - 24, h);
     xyPad.setBounds (display.getRight() + 12, top, xyW, h);
     playBtn.setBounds (xyPad.getRight() + 12, top, playW, h);
 
-    loopBtn.setBounds (21, top + h + 6, 86, 40);
-    stepStrip.setBounds (112, top + h + 10, getWidth() - 112 - 24, 32);
+    loopBtn.setBounds (21, top + h + 6, 100, 40);
+    loopLessBtn.setBounds (122, top + h + 8, 36, 36);
+    loopMoreBtn.setBounds (158, top + h + 8, 36, 36);
+    stepStrip.setBounds (200, top + h + 10, getWidth() - 200 - 24, 32);
+
+    // hide every tab control, then lay out the current tab
+    for (auto& kn : knobs) kn->setVisible (false);
+    for (auto* b : { &distTypeBtn, &keyTrackBtn, &bassPatBtn, &rRateBtn, &bOscBtn }) b->setVisible (false);
 
     auto k = [this] (const char* id) -> juce::Component* { return knobById[id]; };
-    const int y1 = 372, y2 = 498, y3 = 624;
-    layoutRow ({ { k ("pStart"), k ("pEnd"), k ("pDecay"), k ("pCurve"), k ("bend") },
-                 { k ("length"), k ("hold"), k ("shape"), k ("wave") } }, y1);
-    layoutRow ({ { k ("cLevel"), k ("cDecay"), k ("cTone") },
-                 { &distTypeBtn, k ("drive"), k ("dMix"), k ("punch"), k ("tone"), k ("reso") },
-                 { k ("volume"), &keyTrackBtn } }, y2);
-    layoutRow ({ { k ("rAmt"), k ("rSize"), k ("rDrive"), k ("rTone"), k ("rDuck"), k ("rRoll") },
-                 { &bassPatBtn, k ("bLevel"), k ("bSemi"), k ("bDecay"), k ("bCut") } }, y3);
-
-    sectionLabels.clear();
-    auto label = [&] (const char* name, juce::Component* first, juce::Component* last, int y)
+    using Group = std::pair<const char*, std::vector<juce::Component*>>;
+    auto row = [&] (std::vector<Group> groups, int y)
     {
-        const int x0 = dynamic_cast<FunButton*> (first) ? first->getX() - 6 : first->getX();
-        const int x1 = dynamic_cast<FunButton*> (last) ? last->getRight() + 6 : last->getRight();
-        sectionLabels.push_back ({ name, juce::Rectangle<int> (x0 + 6, y, x1 - x0 - 12, 20) });
+        std::vector<std::vector<juce::Component*>> comps;
+        for (auto& g : groups) { comps.push_back (g.second); for (auto* c : g.second) c->setVisible (true); }
+        layoutRow (comps, y);
+        for (auto& g : groups)
+        {
+            auto* first = g.second.front(); auto* last = g.second.back();
+            const int x0 = dynamic_cast<FunButton*> (first) ? first->getX() - 6 : first->getX();
+            const int x1 = dynamic_cast<FunButton*> (last) ? last->getRight() + 6 : last->getRight();
+            sectionLabels.push_back ({ g.first, juce::Rectangle<int> (x0 + 6, y, x1 - x0 - 12, 20) });
+        }
     };
-    label ("PITCH", k ("pStart"), k ("bend"), y1);
-    label ("BODY", k ("length"), k ("wave"), y1);
-    label ("CLICK", k ("cLevel"), k ("cTone"), y2);
-    label ("DRIVE", &distTypeBtn, k ("reso"), y2);
-    label ("OUT", k ("volume"), &keyTrackBtn, y2);
-    label ("RUMBLE", k ("rAmt"), k ("rRoll"), y3);
-    label ("BASS", &bassPatBtn, k ("bCut"), y3);
+    sectionLabels.clear();
+    const int y1 = 412, y2 = 538;
+    if (tab == 0)
+    {
+        row ({ { "PITCH", { k ("pStart"), k ("pEnd"), k ("pDecay"), k ("pCurve"), k ("bend") } },
+               { "BODY", { k ("sub"), k ("length"), k ("hold"), k ("shape"), k ("wave") } },
+               { "OUT", { k ("volume"), &keyTrackBtn } } }, y1);
+        row ({ { "CLICK", { k ("cLevel"), k ("cDecay"), k ("cTone"), k ("metal"), k ("mTone") } },
+               { "DRIVE", { &distTypeBtn, k ("drive"), k ("dMix"), k ("punch"), k ("tone"), k ("reso") } } }, y2);
+    }
+    else if (tab == 1)
+    {
+        row ({ { "REVERB", { k ("rAmt"), k ("rSize"), k ("rPre"), k ("rDamp") } },
+               { "FILTER", { k ("rTone"), k ("rLow") } } }, y1);
+        row ({ { "TEXTURE", { k ("rDrive"), k ("rGrit") } },
+               { "MOTION", { k ("rDuck"), k ("rRoll"), &rRateBtn } } }, y2);
+    }
+    else
+    {
+        row ({ { "PATTERN", { &bassPatBtn, &bOscBtn } },
+               { "NOTE", { k ("bLevel"), k ("bSemi"), k ("bGlide") } },
+               { "ENVELOPE", { k ("bAtk"), k ("bDecay") } } }, y1);
+        row ({ { "FILTER", { k ("bCut"), k ("bReso"), k ("bEnv") } },
+               { "DRIVE", { k ("bDrive") } } }, y2);
+    }
+    repaint();
+}
+
+void CiroKickEditor::setTab (int t)
+{
+    tab = t;
+    for (int i = 0; i < 3; ++i) { tabBtns[i].selected = i == t; tabBtns[i].repaint(); }
+    tabBtns[t].glow = 1.0f;
+    tabBtns[t].pop (0.15f);
+    display.setMode (t);
+    particles.burst (tabBtns[t].getBounds().getCentre().toFloat(), accent, 14, 4.0f);
+    resized();
 }
 
 void CiroKickEditor::timerCallback()
@@ -1177,7 +1292,8 @@ void CiroKickEditor::timerCallback()
         if (std::abs (accent.getFloatRed() - target.getFloatRed()) + std::abs (accent.getFloatGreen() - target.getFloatGreen())
             + std::abs (accent.getFloatBlue() - target.getFloatBlue()) < 0.01f)
             accent = target;
-        for (auto* b : { &randomBtn, &undoBtn, &distTypeBtn, &keyTrackBtn, &bassPatBtn, &presetBtn, &prevBtn, &nextBtn, &mutateBtn, &loopBtn })
+        for (auto* b : { &randomBtn, &undoBtn, &distTypeBtn, &keyTrackBtn, &bassPatBtn, &presetBtn, &prevBtn, &nextBtn, &mutateBtn, &loopBtn,
+                         &rRateBtn, &bOscBtn, &tabBtns[0], &tabBtns[1], &tabBtns[2], &loopLessBtn, &loopMoreBtn })
         { b->colour = accent; b->repaint(); }
         face.accent = xyPad.accent = stepStrip.accent = accent;
         face.repaint(); xyPad.repaint(); stepStrip.repaint();
@@ -1201,8 +1317,10 @@ void CiroKickEditor::timerCallback()
     if (bgFlash > 0.0f) { bgFlash = std::max (0.0f, bgFlash - 0.04f); repaint(); }
 
     display.update (accent, now);
-    for (auto* b : { &randomBtn, &undoBtn, &distTypeBtn, &keyTrackBtn, &bassPatBtn, &presetBtn, &prevBtn, &nextBtn, &mutateBtn, &loopBtn })
+    for (auto* b : { &randomBtn, &undoBtn, &distTypeBtn, &keyTrackBtn, &bassPatBtn, &presetBtn, &prevBtn, &nextBtn, &mutateBtn, &loopBtn,
+                     &rRateBtn, &bOscBtn, &tabBtns[0], &tabBtns[1], &tabBtns[2], &loopLessBtn, &loopMoreBtn })
         b->animate();
+    if ((++frame % 10) == 0) for (auto& t : tabBtns) t.repaint();
     face.animate(); xyPad.animate(); stepStrip.animate();
     playBtn.animate();
     for (auto& b : genreBtns) b->animate();

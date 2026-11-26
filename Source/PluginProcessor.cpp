@@ -36,6 +36,9 @@ APVTS::ParameterLayout CiroKickProcessor::createLayout()
                                                                juce::StringArray { "SOFT", "HARD", "FOLD", "CRUSH" }, 0));
     add ("dMix",   "Drive Mix",   juce::NormalisableRange<float> (0.0f, 1.0f), 1.0f);
     add ("tone",   "Tone",        skewed (300.0f, 20000.0f, 3000.0f), 12000.0f, "Hz");
+    add ("sub",    "Sub",         juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f);
+    add ("metal",  "Metal",       juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f);
+    add ("mTone",  "Metal Tone",  skewed (150.0f, 3000.0f, 600.0f), 500.0f, "Hz");
     add ("reso",   "Resonance",   skewed (0.5f, 8.0f, 1.5f), 0.7f);
     add ("punch",  "Punch",       juce::NormalisableRange<float> (0.0f, 120.0f), 0.0f, "ms");
     add ("rAmt",   "Rumble Amount", juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f);
@@ -44,6 +47,19 @@ APVTS::ParameterLayout CiroKickProcessor::createLayout()
     add ("rTone",  "Rumble Tone",   skewed (40.0f, 400.0f, 140.0f), 140.0f, "Hz");
     add ("rDuck",  "Rumble Duck",   juce::NormalisableRange<float> (0.0f, 1.0f), 0.7f);
     add ("rRoll",  "Rumble Roll",   juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f);
+    p.push_back (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "rRate", 1 }, "Rumble Rate",
+                                                               juce::StringArray { "1/8", "1/16", "1/32" }, 1));
+    add ("rPre",   "Rumble Pre-Delay", juce::NormalisableRange<float> (0.0f, 100.0f), 0.0f, "ms");
+    add ("rDamp",  "Rumble Damp",   juce::NormalisableRange<float> (0.0f, 0.95f), 0.35f);
+    add ("rLow",   "Rumble Low Cut", skewed (20.0f, 250.0f, 50.0f), 25.0f, "Hz");
+    add ("rGrit",  "Rumble Grit",   juce::NormalisableRange<float> (0.0f, 1.0f), 0.3f);
+    p.push_back (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "bOsc", 1 }, "Bass Osc",
+                                                               juce::StringArray { "SAW", "SQUARE", "SINE", "REESE" }, 0));
+    add ("bAtk",   "Bass Attack",   skewed (0.3f, 40.0f, 4.0f), 1.0f, "ms");
+    add ("bEnv",   "Bass Filter Env", juce::NormalisableRange<float> (0.0f, 10.0f), 5.0f);
+    add ("bReso",  "Bass Resonance", skewed (0.5f, 6.0f, 1.2f), 0.9f);
+    add ("bDrive", "Bass Drive",    juce::NormalisableRange<float> (0.0f, 24.0f), 4.0f, "dB");
+    add ("bGlide", "Bass Glide",    juce::NormalisableRange<float> (0.0f, 24.0f), 0.0f, "st");
     p.push_back (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "bPat", 1 }, "Bass Pattern",
                                                                juce::StringArray { "ROLLING", "OFFBEAT", "GALLOP", "REVERSE" }, 0));
     add ("bLevel", "Bass Level",    juce::NormalisableRange<float> (0.0f, 1.0f), 0.0f);
@@ -53,11 +69,19 @@ APVTS::ParameterLayout CiroKickProcessor::createLayout()
     add ("volume", "Volume",      juce::NormalisableRange<float> (-36.0f, 6.0f), -3.0f, "dB");
     p.push_back (std::make_unique<juce::AudioParameterBool> (juce::ParameterID { "keyTrack", 1 }, "Key Track", false));
     p.push_back (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { "genre", 1 }, "Genre",
-        juce::StringArray { "SCHRANZ", "PSYTRANCE", "HARD BOUNCE", "HARDSTYLE", "HARD TECHNO", "GABBER", "TECHNO" }, 0));
+        juce::StringArray { "SCHRANZ", "PSYTRANCE", "HARD BOUNCE", "HARDSTYLE", "HARD TECHNO", "GABBER", "TECHNO", "INDUSTRIAL" }, 0));
     const KickParams defaults;
     for (int i = 0; i < 5; ++i)
     {
         const auto n = juce::String (i);
+        p.push_back (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "rEnvT" + n, 1 }, "Rumble Shape Time " + n,
+                                                                  juce::NormalisableRange<float> (0.0f, 1.0f), defaults.rEnvT[i]));
+        p.push_back (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "rEnvG" + n, 1 }, "Rumble Shape Gain " + n,
+                                                                  juce::NormalisableRange<float> (0.0f, 2.0f), defaults.rEnvG[i]));
+        p.push_back (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "bEnvT" + n, 1 }, "Bass Shape Time " + n,
+                                                                  juce::NormalisableRange<float> (0.0f, 1.0f), defaults.bEnvT[i]));
+        p.push_back (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "bEnvG" + n, 1 }, "Bass Shape Gain " + n,
+                                                                  juce::NormalisableRange<float> (0.0f, 2.0f), defaults.bEnvG[i]));
         p.push_back (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "envT" + n, 1 }, "Shaper Time " + n,
                                                                   juce::NormalisableRange<float> (0.0f, 1.0f), defaults.envT[i]));
         p.push_back (std::make_unique<juce::AudioParameterFloat> (juce::ParameterID { "envG" + n, 1 }, "Shaper Gain " + n,
@@ -108,13 +132,31 @@ KickParams CiroKickProcessor::readParams() const
     k.distMix    = val (apvts, "dMix");
     k.tone       = val (apvts, "tone");
     k.reso       = val (apvts, "reso");
+    k.sub        = val (apvts, "sub");
+    k.metal      = val (apvts, "metal");
+    k.metalTone  = val (apvts, "mTone");
     k.punch      = val (apvts, "punch");
     k.rumbleRoll = val (apvts, "rRoll");
     for (int i = 0; i < 5; ++i)
     {
         k.envT[i] = val (apvts, ("envT" + juce::String (i)).toRawUTF8());
         k.envG[i] = val (apvts, ("envG" + juce::String (i)).toRawUTF8());
+        k.rEnvT[i] = val (apvts, ("rEnvT" + juce::String (i)).toRawUTF8());
+        k.rEnvG[i] = val (apvts, ("rEnvG" + juce::String (i)).toRawUTF8());
+        k.bEnvT[i] = val (apvts, ("bEnvT" + juce::String (i)).toRawUTF8());
+        k.bEnvG[i] = val (apvts, ("bEnvG" + juce::String (i)).toRawUTF8());
     }
+    k.rumbleRate = (int) val (apvts, "rRate");
+    k.rumblePre  = val (apvts, "rPre");
+    k.rumbleDamp = val (apvts, "rDamp");
+    k.rumbleLow  = val (apvts, "rLow");
+    k.rumbleGrit = val (apvts, "rGrit");
+    k.bassOsc    = (int) val (apvts, "bOsc");
+    k.bassAttack = val (apvts, "bAtk");
+    k.bassEnvAmt = val (apvts, "bEnv");
+    k.bassReso   = val (apvts, "bReso");
+    k.bassDrive  = val (apvts, "bDrive");
+    k.bassGlide  = val (apvts, "bGlide");
     k.rumbleAmt   = val (apvts, "rAmt");
     k.rumbleSize  = val (apvts, "rSize");
     k.rumbleDrive = val (apvts, "rDrive");
@@ -159,13 +201,31 @@ void CiroKickProcessor::writeParams (const KickParams& k)
     setParam (apvts, "dMix",   k.distMix);
     setParam (apvts, "tone",   k.tone);
     setParam (apvts, "reso",   k.reso);
+    setParam (apvts, "sub",    k.sub);
+    setParam (apvts, "metal",  k.metal);
+    setParam (apvts, "mTone",  k.metalTone);
     setParam (apvts, "punch",  k.punch);
     setParam (apvts, "rRoll",  k.rumbleRoll);
     for (int i = 0; i < 5; ++i)
     {
         setParam (apvts, ("envT" + juce::String (i)).toRawUTF8(), k.envT[i]);
         setParam (apvts, ("envG" + juce::String (i)).toRawUTF8(), k.envG[i]);
+        setParam (apvts, ("rEnvT" + juce::String (i)).toRawUTF8(), k.rEnvT[i]);
+        setParam (apvts, ("rEnvG" + juce::String (i)).toRawUTF8(), k.rEnvG[i]);
+        setParam (apvts, ("bEnvT" + juce::String (i)).toRawUTF8(), k.bEnvT[i]);
+        setParam (apvts, ("bEnvG" + juce::String (i)).toRawUTF8(), k.bEnvG[i]);
     }
+    setParam (apvts, "rRate",  (float) k.rumbleRate);
+    setParam (apvts, "rPre",   k.rumblePre);
+    setParam (apvts, "rDamp",  k.rumbleDamp);
+    setParam (apvts, "rLow",   k.rumbleLow);
+    setParam (apvts, "rGrit",  k.rumbleGrit);
+    setParam (apvts, "bOsc",   (float) k.bassOsc);
+    setParam (apvts, "bAtk",   k.bassAttack);
+    setParam (apvts, "bEnv",   k.bassEnvAmt);
+    setParam (apvts, "bReso",  k.bassReso);
+    setParam (apvts, "bDrive", k.bassDrive);
+    setParam (apvts, "bGlide", k.bassGlide);
     setParam (apvts, "rAmt",   k.rumbleAmt);
     setParam (apvts, "rSize",  k.rumbleSize);
     setParam (apvts, "rDrive", k.rumbleDrive);
@@ -221,10 +281,16 @@ void CiroKickProcessor::mutate()
     triggerFromUI();
 }
 
-void CiroKickProcessor::setSteps (int mask)
+void CiroKickProcessor::setSteps (juce::int64 mask)
 {
     steps = mask;
     apvts.state.setProperty ("steps", mask, nullptr);
+}
+
+void CiroKickProcessor::setLoopLength (int len)
+{
+    loopLen = std::clamp (len, 1, 32);
+    apvts.state.setProperty ("loopLen", loopLen.load(), nullptr);
 }
 
 bool CiroKickProcessor::undoRandom()
@@ -263,7 +329,8 @@ void CiroKickProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         }
     const bool looping = val (apvts, "loop") > 0.5f;
     const double ppqPerSample = bpm.load() / 60.0 / sampleRateHz;
-    const int stepMask = steps.load();
+    const juce::int64 stepMask = steps.load();
+    const int len = loopLen.load();
 
     engine.setParams (readParams());
 
@@ -277,7 +344,7 @@ void CiroKickProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         {
             if (looping)
             {
-                const int step = ((int) std::floor (loopPpq * 4.0)) & 15;
+                const int step = (int) (((juce::int64) std::floor (loopPpq * 4.0)) % len);
                 if (step != lastStep)
                 {
                     lastStep = step;
@@ -321,7 +388,8 @@ void CiroKickProcessor::setStateInformation (const void* data, int size)
         if (xml->hasTagName (apvts.state.getType()))
         {
             apvts.replaceState (juce::ValueTree::fromXml (*xml));
-            steps = (int) apvts.state.getProperty ("steps", 0x1111);
+            steps = (juce::int64) apvts.state.getProperty ("steps", (juce::int64) 0x11111111);
+            loopLen = std::clamp ((int) apvts.state.getProperty ("loopLen", 16), 1, 32);
         }
 }
 
